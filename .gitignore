@@ -1,0 +1,14 @@
+# Build output
+bin/
+obj/
+*.user
+
+# Decompiler dumps (large; regenerated locally, never committed)
+recon/dump/
+recon/cpp2il_out/
+recon/*.dll
+recon/*.dat
+
+# Do NOT commit game binaries or third-party tools
+tools/
+*.zip
