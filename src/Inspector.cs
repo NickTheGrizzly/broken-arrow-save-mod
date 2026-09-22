@@ -451,6 +451,61 @@ namespace BASaveGame
             Flush(sb, "records");
         }
 
+        // ===== LOAD support: existence/location checks for a spawned entity =====
+
+        /// <summary>Count of live UnitComponent entities (a spawn should bump this by 1). -1 on error.</summary>
+        internal static int CountUnits()
+        {
+            try
+            {
+                var world = GameController.Instance.GameContext;
+                if (world == null || !EnsureGenericProbe()) return -1;
+                Assembly ba = typeof(GameController).Assembly;
+                Type unitT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent");
+                return CountWith(world, unitT);
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>Describe one entity: does it carry UnitComponent / a model, its owner, and its
+        /// world position (via the reliable UnitModelInfoComponent -> Unity transform path).</summary>
+        internal static string DescribeEntity(Entity e)
+        {
+            try
+            {
+                var world = GameController.Instance.GameContext;
+                if (world == null || !EnsureGenericProbe()) return "no world/generics";
+                _pools = new Dictionary<Type, PoolView>();
+                Assembly ba = typeof(GameController).Assembly;
+                Type unitT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent");
+                Type modelT = ba.GetType("Il2CppBrokenArrow.Client.Ecs.Spawn.Components.UnitModelInfoComponent");
+                int eid = e.EntityId;
+                // Identity + liveness first: a disposed/recycled entity reports Has<T>=false for
+                // everything, which would otherwise look like "built without components".
+                string alive = SafeVal(() => e.IsAlive) + "/" + SafeVal(() => e.IsAliveVersion);
+                string ident = string.Format("E{0} W{1} v{2} (gameWorld W{3}) alive/aliveVer={4}",
+                    eid, e.WorldId, e.Version, SafeVal(() => world.WorldId), alive);
+
+                // Surface Has<T> failures instead of reporting them as false.
+                string hasUnit, hasModel;
+                bool unitOk = false, modelOk = false;
+                try { unitOk = EntityHas(e, unitT); hasUnit = unitOk.ToString(); } catch (Exception ex) { hasUnit = "<err:" + ex.Message + ">"; }
+                try { modelOk = EntityHas(e, modelT); hasModel = modelOk.ToString(); } catch (Exception ex) { hasModel = "<err:" + ex.Message + ">"; }
+
+                string pos = "n/a";
+                if (modelOk)
+                {
+                    object umi = ReadComp(world, modelT, eid);
+                    object tr = Call(Call(Call(umi, "get_Data"), "get_PrefabRootScript"), "get_transform");
+                    pos = Fmt(Call(tr, "get_position"));
+                }
+                object owner = null;
+                if (unitOk) { object uc = ReadComp(world, unitT, eid); owner = Call(Call(uc, "get_Owner"), "get_UID"); }
+                return string.Format("{0} hasUnit={1} hasModel={2} owner={3} pos={4}", ident, hasUnit, hasModel, owner, pos);
+            }
+            catch (Exception ex) { return "describe err: " + ex.Message; }
+        }
+
         // ===== SAVE: write a .basave of the current battle's living units =====
         internal static void WriteQuickSave()
         {

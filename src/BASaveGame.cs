@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using MelonLoader;
 using UnityEngine;
 
@@ -23,6 +24,13 @@ namespace BASaveGame
 
         public override void OnInitializeMelon()
         {
+            // Prevent the MelonLoader console's QuickEdit mode from freezing the game:
+            // clicking into the console puts it in text-selection mode, which blocks every
+            // write to it. Since our code (and MelonLogger) run on the game's main thread,
+            // a blocked console write hangs the whole game. Turning QuickEdit off makes an
+            // accidental click harmless.
+            DisableConsoleQuickEdit();
+
             LoggerInstance.Msg("BA Save Game initializing...");
 
             // This build targets an offline-only install with no online capability, so
@@ -48,8 +56,11 @@ namespace BASaveGame
                 LoggerInstance.Error("Could not prepare save directory: " + e);
             }
 
+            try { HarmonyInstance.PatchAll(System.Reflection.Assembly.GetExecutingAssembly()); }
+            catch (Exception e) { LoggerInstance.Warning("PatchAll: " + e.Message); }
+
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE. Inspector: F7 summary, F8 census, F9 unit dump, F11 unit records.");
+            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F12 = spawn saved unit#1 (PoC). Inspector: F7/F8/F9/F11.");
         }
 
         private static bool _enabled;
@@ -58,14 +69,17 @@ namespace BASaveGame
         public override void OnUpdate()
         {
             if (!_enabled) return;
+            LoadGame.PumpPending();  // observe a pending spawn UniTask's result (surfaces async faults)
             try
             {
                 if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
+                else if (Input.GetKeyDown(KeyCode.F6)) LoadGame.DryRun();
                 else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
                 else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
                 else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
                 else if (Input.GetKeyDown(KeyCode.F10)) Inspector.SerializerTest();
                 else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
+                else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnFirstUnit();
             }
             catch (Exception e)
             {
@@ -76,6 +90,30 @@ namespace BASaveGame
                         "). Hotkeys disabled; will add an alternate trigger if needed.");
                 }
             }
+        }
+
+        // ---- Console QuickEdit hardening (Win32) ----
+
+        private const int STD_INPUT_HANDLE = -10;
+        private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+        private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+
+        [DllImport("kernel32.dll")] private static extern IntPtr GetStdHandle(int nStdHandle);
+        [DllImport("kernel32.dll")] private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+        [DllImport("kernel32.dll")] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+        private void DisableConsoleQuickEdit()
+        {
+            try
+            {
+                IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
+                if (h == IntPtr.Zero || h == new IntPtr(-1)) return;   // no console attached
+                if (!GetConsoleMode(h, out uint mode)) return;
+                uint newMode = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
+                if (newMode != mode) SetConsoleMode(h, newMode);
+                LoggerInstance.Msg("Console QuickEdit disabled (clicking the console won't freeze the game).");
+            }
+            catch (Exception e) { LoggerInstance.Warning("DisableConsoleQuickEdit: " + e.Message); }
         }
 
         /// <summary>
