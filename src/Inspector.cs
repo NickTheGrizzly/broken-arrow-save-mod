@@ -7,6 +7,7 @@ using System.Text;
 using MelonLoader;
 using Il2CppDefaultEcs;
 using Il2CppBrokenArrow.Client.Ecs.Controllers;
+using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace BASaveGame
 {
@@ -26,7 +27,8 @@ namespace BASaveGame
         private static MethodInfo _withDef;    // EntityQueryBuilder.With<T>()
         private static MethodInfo _getDef;     // Entity.Get<T>()
         private static MethodInfo _hasDef;     // Entity.Has<T>()
-        private static MethodInfo _getAllDef;  // World.GetAll<T>()
+        private static MethodInfo _getAllDef;         // World.GetAll<T>()
+        private static MethodInfo _getComponentsDef;  // World.GetComponents<T>()
         private static bool _genericProbeFailed;
 
         // Save-critical components to read full schema for (via safe GetAll).
@@ -201,11 +203,98 @@ namespace BASaveGame
                 DumpGetAll(sb, world, ba, n, 2);
 
             Flush(sb, "units");
+        }
 
-            // Association experiment: does a TYPED per-entity Get<T> marshal correctly
-            // (unlike the reflection Get<T>, which returned byref garbage / crashed)?
-            // Writes incrementally to live_typedget.txt so a crash still shows progress.
-            TypedGetExperiment(world, unitEntities, ba);
+        // Pure-data components safe to serialize (no Unity object refs / delegates).
+        // Matched by simple type-name suffix against Il2CppSystem.Type.FullName.
+        private static readonly HashSet<string> SerWhitelist = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "TransformComponent", "HealthComponent", "AltitudeComponent",
+            "SpeedComponent", "MaxSpeedComponent", "AccelerationComponent",
+            "RotationSpeedComponent", "MaxRotationSpeedComponent", "MovingComponent",
+            "StaticPositionComponent", "StaticRotationComponent",
+            "TerrainTypeComponent", "VerticalOrientationComponent",
+        };
+
+        // Filter predicate handed to the DefaultEcs serializer. Receives the il2cpp
+        // System.Type of each component; return true to include it.
+        private static bool SerFilter(Il2CppSystem.Type t)
+        {
+            try
+            {
+                string full = t.FullName ?? "";
+                int dot = full.LastIndexOf('.');
+                string simple = dot >= 0 ? full.Substring(dot + 1) : full;
+                bool ok = SerWhitelist.Contains(simple);
+                if (ok) AppendLive("ser", "  include: " + full);
+                return ok;
+            }
+            catch { return false; }
+        }
+
+        // F10: test DefaultEcs TextSerializer on a few live units with a pure-data filter.
+        // If this works, its output IS (essentially) our save format and proves save/load.
+        internal static void SerializerTest()
+        {
+            AppendLive("ser", "==== serializer test @ " + DateTime.Now.ToString("s") + " ====");
+            if (!GameController.IsInstanceAlive) { AppendLive("ser", "not in battle"); return; }
+            World world;
+            try { world = GameController.Instance.GameContext; }
+            catch (Exception e) { AppendLive("ser", "GameContext threw: " + e.Message); return; }
+            if (world == null) { AppendLive("ser", "GameContext null"); return; }
+            if (!EnsureGenericProbe()) { AppendLive("ser", "generic probe unavailable"); return; }
+
+            Assembly ba = typeof(GameController).Assembly;
+            Type unitT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent");
+            Type deadT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.DeadComponent");
+
+            List<Entity> units = EntitiesWith(world, unitT);
+            AppendLive("ser", "unit entities: " + units.Count);
+            if (units.Count == 0) return;
+
+            try
+            {
+                AppendLive("ser", "step1: building filter delegate...");
+                Func<Il2CppSystem.Type, bool> managed = SerFilter;
+                var pred = Il2CppInterop.Runtime.DelegateSupport
+                    .ConvertDelegate<Il2CppSystem.Predicate<Il2CppSystem.Type>>(managed);
+
+                AppendLive("ser", "step2: creating TextSerializer(filter)...");
+                var ser = new Il2CppDefaultEcs.Serialization.TextSerializer(pred);
+
+                AppendLive("ser", "step3: collecting up to 3 alive units...");
+                var list = new Il2CppSystem.Collections.Generic.List<Entity>();
+                int added = 0;
+                foreach (Entity e in units)
+                {
+                    bool dead = false;
+                    try { if (deadT != null) dead = EntityHas(e, deadT); } catch { }
+                    if (dead) continue;
+                    list.Add(e);
+                    AppendLive("ser", "  + " + SafeEntityId(e));
+                    if (++added >= 3) break;
+                }
+                AppendLive("ser", "entities queued: " + list.Count);
+
+                AppendLive("ser", "step4: serializing to MemoryStream...");
+                var ms = new Il2CppSystem.IO.MemoryStream();
+                var en = list.Cast<Il2CppSystem.Collections.Generic.IEnumerable<Entity>>();
+                ser.Serialize(ms, en);
+                AppendLive("ser", "step5: serialized OK. bytes=" + ms.Length);
+
+                var arr = ms.ToArray();
+                var bytes = new byte[arr.Length];
+                for (int i = 0; i < arr.Length; i++) bytes[i] = arr[i];
+                string text = System.Text.Encoding.UTF8.GetString(bytes);
+                AppendLive("ser", "---- TEXT START (" + bytes.Length + " bytes) ----");
+                foreach (string ln in text.Split('\n')) AppendLive("ser", ln.TrimEnd('\r'));
+                AppendLive("ser", "---- TEXT END ----");
+            }
+            catch (Exception ex)
+            {
+                AppendLive("ser", "EXCEPTION: " + ex.GetType().FullName + ": " + ex.Message);
+                if (ex.InnerException != null) AppendLive("ser", "  inner: " + ex.InnerException.Message);
+            }
         }
 
         // Generic GetAll<T> reader via reflection (T resolved from name). GetAll returns
@@ -256,6 +345,217 @@ namespace BASaveGame
             AppendLive("typedget", "SUCCESS: typed Get<HealthComponent> read valid data (health should be sane, e.g. 100).");
         }
 
+        // ===== Universal per-entity component read via DefaultEcs pool mapping =====
+        // Components<T> exposes _mapping (entityId -> dense index). The dense array itself
+        // must be read via GetAll<T>().ToArray() — the raw _components indexer mis-marshals
+        // large value-type structs (e.g. TransformComponent), while ToArray() copies correctly.
+        // Cached per component type per UnitRecords() pass.
+        private sealed class PoolView
+        {
+            public Il2CppStructArray<int> Mapping;
+            public object Arr;         // Il2CppArrayBase<T> from ToArray()
+            public MethodInfo GetItem; // Arr.get_Item(int)
+            public int Len;
+        }
+        private static Dictionary<Type, PoolView> _pools;
+
+        private static PoolView Pool(World world, Type t)
+        {
+            if (_pools.TryGetValue(t, out PoolView p)) return p;
+            p = new PoolView();
+            try
+            {
+                object comps = _getComponentsDef.MakeGenericMethod(t).Invoke(world, null); // Components<T>
+                p.Mapping = (Il2CppStructArray<int>)comps.GetType().GetMethod("get__mapping").Invoke(comps, null);
+                object span = _getAllDef.MakeGenericMethod(t).Invoke(world, null);          // Span<T>
+                p.Arr = span.GetType().GetMethod("ToArray", Type.EmptyTypes).Invoke(span, null);
+                p.Len = (int)p.Arr.GetType().GetProperty("Length").GetValue(p.Arr);
+                p.GetItem = p.Arr.GetType().GetMethod("get_Item", new[] { typeof(int) });
+            }
+            catch { p.Mapping = null; }
+            _pools[t] = p;
+            return p;
+        }
+
+        private static object ReadComp(World world, Type t, int entityId)
+        {
+            PoolView p = Pool(world, t);
+            if (p.Mapping == null || p.Arr == null) return null;
+            if (entityId < 0 || entityId >= p.Mapping.Length) return null;
+            int idx = p.Mapping[entityId];
+            if (idx < 0 || idx >= p.Len) return null;
+            return p.GetItem.Invoke(p.Arr, new object[] { idx });
+        }
+
+        private static object Call(object o, string getter)
+        {
+            if (o == null) return null;
+            try { var m = o.GetType().GetMethod(getter, Type.EmptyTypes); return m == null ? null : m.Invoke(o, null); }
+            catch (Exception e) { return "<err:" + e.Message + ">"; }
+        }
+        private static object FieldVal(object o, string field)
+        {
+            if (o == null) return null;
+            try { var f = o.GetType().GetField(field); return f == null ? null : f.GetValue(o); }
+            catch (Exception e) { return "<err:" + e.Message + ">"; }
+        }
+
+        // F11: assemble real per-unit save records using the mapping reader.
+        internal static void UnitRecords()
+        {
+            var sb = new StringBuilder();
+            Line(sb, "===== BA Inspector: UNIT RECORDS (mapping reader) =====");
+            Line(sb, "time: " + DateTime.Now.ToString("s"));
+            if (!GameController.IsInstanceAlive) { Line(sb, "not in battle"); Flush(sb, "records"); return; }
+            World world;
+            try { world = GameController.Instance.GameContext; }
+            catch (Exception e) { Line(sb, "ctx: " + e.Message); Flush(sb, "records"); return; }
+            if (world == null || !EnsureGenericProbe()) { Line(sb, "no world / no generics"); Flush(sb, "records"); return; }
+
+            _pools = new Dictionary<Type, PoolView>();
+            Assembly ba = typeof(GameController).Assembly;
+            Type unitT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent");
+            Type healthT = ba.GetType("Il2CppBrokenArrow.Client.Ecs.BattleSystem.Components.HealthComponent");
+            Type transT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.TransformComponent");
+            Type deadT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.DeadComponent");
+
+            var units = EntitiesWith(world, unitT);
+            Line(sb, "unit entities: " + units.Count);
+            Line(sb, "");
+
+            int shown = 0;
+            foreach (Entity e in units)
+            {
+                int eid = e.EntityId;
+                bool dead = false; try { dead = EntityHas(e, deadT); } catch { }
+
+                object uc = null, hc = null, tc = null;
+                try { uc = ReadComp(world, unitT, eid); } catch (Exception ex) { Line(sb, "  uc err: " + ex.Message); }
+                try { hc = ReadComp(world, healthT, eid); } catch { }
+                try { tc = ReadComp(world, transT, eid); } catch { }
+
+                object owner = Call(Call(uc, "get_Owner"), "get_UID");
+                object team = Call(Call(uc, "get_Owner"), "get_TeamSide");
+                object ud = Call(uc, "get_UnitData");
+                object typeId = Call(ud, "get_Id");
+                object typeName = Call(ud, "get_Name");
+                object hp = FieldVal(hc, "_health");
+                object maxhp = FieldVal(hc, "MaxHealth");
+                object pos = Fmt(Call(tc, "get_Position"));
+
+                Line(sb, string.Format("#{0,-2} E{1,-5} dead={2,-5} owner={3} team={4} type={5}/{6} hp={7}/{8} pos={9}",
+                    ++shown, eid, dead, owner, team, typeId, typeName, hp, maxhp, pos));
+
+                if (shown >= 20) { Line(sb, "... (truncated at 20)"); break; }
+            }
+            Flush(sb, "records");
+        }
+
+        // ===== SAVE: write a .basave of the current battle's living units =====
+        internal static void WriteQuickSave()
+        {
+            if (!GameController.IsInstanceAlive) { MelonLogger.Warning("[save] not in a battle"); return; }
+            World world;
+            try { world = GameController.Instance.GameContext; }
+            catch (Exception e) { MelonLogger.Error("[save] GameContext: " + e.Message); return; }
+            if (world == null || !EnsureGenericProbe()) { MelonLogger.Error("[save] no world/generics"); return; }
+
+            _pools = new Dictionary<Type, PoolView>();
+            Assembly ba = typeof(GameController).Assembly;
+            Type unitT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent");
+            Type healthT = ba.GetType("Il2CppBrokenArrow.Client.Ecs.BattleSystem.Components.HealthComponent");
+            Type transT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.TransformComponent");
+            Type deadT = ba.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.DeadComponent");
+            Type modelT = ba.GetType("Il2CppBrokenArrow.Client.Ecs.Spawn.Components.UnitModelInfoComponent");
+
+            string mapName = ""; float gameTime = 0f;
+            try { mapName = GameController.Instance.CurrentMapName; } catch { }
+            try { gameTime = GameController.Instance.GameTime; } catch { }
+
+            var units = EntitiesWith(world, unitT);
+            var sb = new StringBuilder();
+            sb.Append("{\n");
+            sb.Append("  \"saveVersion\": 1,\n");
+            sb.Append("  \"gameVersion\": \"1.2.0\",\n");
+            sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
+            sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
+            sb.Append("  \"gameTime\": ").Append(Inv(gameTime)).Append(",\n");
+            sb.Append("  \"units\": [\n");
+
+            int written = 0, skippedDead = 0;
+            for (int u = 0; u < units.Count; u++)
+            {
+                Entity e = units[u];
+                int eid = e.EntityId;
+                bool dead = false; try { dead = EntityHas(e, deadT); } catch { }
+                if (dead) { skippedDead++; continue; }
+
+                object uc = ReadComp(world, unitT, eid);
+                if (uc == null) continue;
+                object ownerObj = Call(uc, "get_Owner");
+                int owner = ToInt(Call(ownerObj, "get_UID"));
+                string team = Convert.ToString(Call(ownerObj, "get_TeamSide"));
+                object ud = Call(uc, "get_UnitData");
+                int typeId = ToInt(Call(ud, "get_Id"));
+                string typeName = Convert.ToString(Call(ud, "get_Name"));
+
+                object hc = ReadComp(world, healthT, eid);
+                float hp = ToFloat(FieldVal(hc, "_health"));
+                float maxHp = ToFloat(FieldVal(hc, "MaxHealth"));
+
+                // Position/rotation from the Unity Transform (large ECS structs mis-marshal;
+                // UnitModelInfoComponent is a true ref type -> reliable -> GameObject transform).
+                object umi = ReadComp(world, modelT, eid);
+                object data = Call(umi, "get_Data");
+                object prefab = Call(data, "get_PrefabRootScript");
+                object tr = Call(prefab, "get_transform");
+                object pos = Call(tr, "get_position");
+                object rot = Call(tr, "get_rotation");
+
+                if (written++ > 0) sb.Append(",\n");
+                sb.Append("    {");
+                sb.Append("\"eid\": ").Append(eid);
+                sb.Append(", \"owner\": ").Append(owner);
+                sb.Append(", \"team\": \"").Append(Esc(team)).Append("\"");
+                sb.Append(", \"typeId\": ").Append(typeId);
+                sb.Append(", \"typeName\": \"").Append(Esc(typeName)).Append("\"");
+                sb.Append(", \"hp\": ").Append(Inv(hp));
+                sb.Append(", \"maxHp\": ").Append(Inv(maxHp));
+                sb.Append(", \"pos\": [").Append(Inv(Num(pos, "x"))).Append(", ").Append(Inv(Num(pos, "y"))).Append(", ").Append(Inv(Num(pos, "z"))).Append("]");
+                sb.Append(", \"rot\": [").Append(Inv(Num(rot, "x"))).Append(", ").Append(Inv(Num(rot, "y"))).Append(", ").Append(Inv(Num(rot, "z"))).Append(", ").Append(Inv(Num(rot, "w"))).Append("]");
+                sb.Append("}");
+            }
+            sb.Append("\n  ]\n}\n");
+
+            try
+            {
+                string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
+                File.WriteAllText(path, sb.ToString());
+                MelonLogger.Msg("[save] wrote " + written + " units (skipped " + skippedDead + " dead) -> " + path);
+            }
+            catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); }
+        }
+
+        private static string Esc(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        }
+        private static string Inv(float f) { return f.ToString("R", System.Globalization.CultureInfo.InvariantCulture); }
+        private static int ToInt(object o) { try { return o == null ? 0 : Convert.ToInt32(o); } catch { return 0; } }
+        private static float ToFloat(object o) { try { return o == null ? 0f : Convert.ToSingle(o); } catch { return 0f; } }
+        private static float Num(object o, string name)
+        {
+            if (o == null) return 0f;
+            try
+            {
+                var p = o.GetType().GetProperty(name);
+                object v = p != null ? p.GetValue(o) : o.GetType().GetField(name)?.GetValue(o);
+                return ToFloat(v);
+            }
+            catch { return 0f; }
+        }
+
         // ---- entity counting (no generics needed) ----
 
         private static int CountAll(World world)
@@ -294,6 +594,10 @@ namespace BASaveGame
                                       && m.GetParameters().Length == 0);
                 _getAllDef = typeof(World).GetMethods()
                     .FirstOrDefault(m => m.Name == "GetAll"
+                                      && m.IsGenericMethodDefinition
+                                      && m.GetParameters().Length == 0);
+                _getComponentsDef = typeof(World).GetMethods()
+                    .FirstOrDefault(m => m.Name == "GetComponents"
                                       && m.IsGenericMethodDefinition
                                       && m.GetParameters().Length == 0);
                 if (_withDef == null) { _genericProbeFailed = true; return false; }

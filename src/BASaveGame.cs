@@ -49,7 +49,7 @@ namespace BASaveGame
             }
 
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. Inspector hotkeys: F7 = world summary, F8 = component census, F9 = unit value dump.");
+            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE. Inspector: F7 summary, F8 census, F9 unit dump, F11 unit records.");
         }
 
         private static bool _enabled;
@@ -60,9 +60,12 @@ namespace BASaveGame
             if (!_enabled) return;
             try
             {
-                if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
+                if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
+                else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
                 else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
                 else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
+                else if (Input.GetKeyDown(KeyCode.F10)) Inspector.SerializerTest();
+                else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
             }
             catch (Exception e)
             {
