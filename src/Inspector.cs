@@ -499,9 +499,14 @@ namespace BASaveGame
                     object tr = Call(Call(Call(umi, "get_Data"), "get_PrefabRootScript"), "get_transform");
                     pos = Fmt(Call(tr, "get_position"));
                 }
-                object owner = null;
-                if (unitOk) { object uc = ReadComp(world, unitT, eid); owner = Call(Call(uc, "get_Owner"), "get_UID"); }
-                return string.Format("{0} hasUnit={1} hasModel={2} owner={3} pos={4}", ident, hasUnit, hasModel, owner, pos);
+                object owner = null, typeId = null;
+                if (unitOk)
+                {
+                    object uc = ReadComp(world, unitT, eid);
+                    owner = Call(Call(uc, "get_Owner"), "get_UID");
+                    typeId = Call(Call(uc, "get_UnitData"), "get_Id");
+                }
+                return string.Format("{0} hasUnit={1} hasModel={2} type={3} owner={4} pos={5}", ident, hasUnit, hasModel, typeId, owner, pos);
             }
             catch (Exception ex) { return "describe err: " + ex.Message; }
         }

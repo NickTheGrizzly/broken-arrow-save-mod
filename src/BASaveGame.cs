@@ -60,7 +60,7 @@ namespace BASaveGame
             catch (Exception e) { LoggerInstance.Warning("PatchAll: " + e.Message); }
 
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F12 = spawn saved unit#1 (PoC). Inspector: F7/F8/F9/F11.");
+            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F12 = spawn all saved units into this battle. Inspector: F7/F8/F9/F11.");
         }
 
         private static bool _enabled;
@@ -69,7 +69,7 @@ namespace BASaveGame
         public override void OnUpdate()
         {
             if (!_enabled) return;
-            LoadGame.PumpPending();  // observe a pending spawn UniTask's result (surfaces async faults)
+            LoadGame.Pump();  // drives an in-progress F12 spawn batch (one unit per frame)
             try
             {
                 if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
@@ -79,7 +79,7 @@ namespace BASaveGame
                 else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
                 else if (Input.GetKeyDown(KeyCode.F10)) Inspector.SerializerTest();
                 else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
-                else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnFirstUnit();
+                else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnAllUnits();
             }
             catch (Exception e)
             {
