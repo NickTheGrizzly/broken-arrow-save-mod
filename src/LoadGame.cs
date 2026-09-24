@@ -42,6 +42,8 @@ namespace BASaveGame
             public int skin;                     // -1 = not in save (v1)
             public int[] opts;                   // option ids; empty for v1 saves
             public List<KeyValuePair<int, int>> ammo;  // (ammoId, count); empty for v1 saves
+            public int eid;                      // entity id at save time (links passengers to vehicles)
+            public int inUnit, inBld;            // container: saved unit eid / building entity id; -1 = none
             public float[] pos, rot;
         }
 
@@ -51,6 +53,18 @@ namespace BASaveGame
         private static int _index, _total, _ok, _hpRestored;
         private static List<string> _failures;
         private static DataBaseService _db;
+
+        // For the passenger pass after all spawns: every saved unit, and saved eid -> new entity.
+        private static List<Rec> _all;
+        private static Dictionary<int, Entity> _spawned;
+        private static int _loaded, _loadWanted;
+
+        // ForceLoadCommand queues an order the game carries out over later frames, so loads are
+        // verified by polling after they're issued rather than in the same frame.
+        private struct PendingLoad { public Entity cargo, container; public string label; }
+        private static List<PendingLoad> _pendingLoads;
+        private static float _loadDeadline;
+        private const float LoadVerifySeconds = 5f;
 
         // In-flight spawn.
         private static Rec _current;
@@ -110,6 +124,10 @@ namespace BASaveGame
             _total = units.Count;
             _ok = 0;
             _hpRestored = 0;
+            _all = units;
+            _spawned = new Dictionary<int, Entity>();
+            _loaded = 0;
+            _loadWanted = 0;
             _failures = new List<string>();
             Live("queued " + _total + " units; spawning one per frame...");
         }
@@ -135,7 +153,18 @@ namespace BASaveGame
                 return;  // next unit on the next frame
             }
 
-            if (_queue.Count == 0) { Summary(); EndBatch(); return; }
+            if (_queue.Count == 0)
+            {
+                if (_pendingLoads == null)
+                {
+                    LoadPassengers();  // issues the load commands
+                    _loadDeadline = Time.realtimeSinceStartup + LoadVerifySeconds;
+                }
+                if (!VerifyLoads()) return;  // keep polling until all loaded or timeout
+                Summary();
+                EndBatch();
+                return;
+            }
             StartNext();
         }
 
@@ -205,6 +234,7 @@ namespace BASaveGame
             // The captured entity is the authoritative signal; the unit-count delta is only a
             // fallback (other units can die or deploy between the two counts).
             bool ok = fault == null && (LastSpawnedValid ? alive : delta >= 1);
+            if (ok && LastSpawnedValid) _spawned[_current.eid] = LastSpawned;
 
             // Restore saved damage (spawns come in at full HP). Only for units that were damaged.
             string hpNote = "";
@@ -223,6 +253,74 @@ namespace BASaveGame
                             (ok ? "" : "  <- see GameLogs for the game's error");
             Record(ok, detail);
         }
+
+        /// <summary>
+        /// After every unit has spawned: put passengers back into their vehicle's new copy and
+        /// garrisons back into their building, via the game's SpawnService.ForceLoadCommand
+        /// (plain Entity args — no byref). Vehicles may appear after their passengers in the save,
+        /// which is why this is a separate pass rather than part of each spawn.
+        /// </summary>
+        private static void LoadPassengers()
+        {
+            _pendingLoads = new List<PendingLoad>();
+            Dictionary<int, Entity> containers = null;  // live container entities, for buildings
+            foreach (Rec r in _all)
+            {
+                if (r.inUnit < 0 && r.inBld < 0) continue;
+                _loadWanted++;
+                string who = string.Format("{0} ({1}) E{2}", r.typeName, r.typeId, r.eid);
+
+                if (!_spawned.TryGetValue(r.eid, out Entity cargo)) { Live("  load skip " + who + ": passenger wasn't spawned"); continue; }
+
+                Entity container;
+                string where;
+                if (r.inUnit >= 0)
+                {
+                    if (!_spawned.TryGetValue(r.inUnit, out container)) { Live("  load skip " + who + ": its vehicle E" + r.inUnit + " wasn't spawned"); continue; }
+                    where = "vehicle (saved E" + r.inUnit + " -> E" + container.EntityId + ")";
+                }
+                else
+                {
+                    containers ??= Inspector.ContainerEntities();
+                    if (!containers.TryGetValue(r.inBld, out container) || Inspector.IsUnit(container))
+                    { Live("  load skip " + who + ": building E" + r.inBld + " not found"); continue; }
+                    where = "building E" + r.inBld;
+                }
+
+                try
+                {
+                    SpawnService.ForceLoadCommand(cargo, container, false);
+                    _pendingLoads.Add(new PendingLoad { cargo = cargo, container = container, label = who + " -> " + where });
+                }
+                catch (Exception ex) { Live("  load " + who + " -> " + where + " threw: " + ex.Message); }
+            }
+            if (_pendingLoads.Count > 0)
+                Live("  issued " + _pendingLoads.Count + " load command(s); verifying for up to " + LoadVerifySeconds + "s...");
+        }
+
+        /// <summary>Returns true when every pending load is confirmed or the deadline passed.</summary>
+        private static bool VerifyLoads()
+        {
+            for (int i = _pendingLoads.Count - 1; i >= 0; i--)
+            {
+                PendingLoad p = _pendingLoads[i];
+                if (Inspector.IsLoaded(p.cargo) || Inspector.IsInside(p.container, p.cargo))
+                {
+                    _loaded++;
+                    Live("  load OK: " + p.label);
+                    _pendingLoads.RemoveAt(i);
+                }
+            }
+            if (_pendingLoads.Count == 0) return true;
+            if (Time.realtimeSinceStartup < _loadDeadline) return false;
+
+            foreach (PendingLoad p in _pendingLoads)
+                Live("  load NOT confirmed after " + LoadVerifySeconds + "s: " + p.label +
+                     "  (alive=" + SafeAlive(p.cargo) + ")");
+            return true;
+        }
+
+        private static string SafeAlive(Entity e) { try { return e.IsAlive.ToString(); } catch { return "?"; } }
 
         // Give up on the in-flight spawn (timeout / awaiter failure) and move on.
         private static void Abandon(string why)
@@ -245,13 +343,17 @@ namespace BASaveGame
         private static void Summary()
         {
             Live("spawn all done: " + _ok + "/" + _total + " spawned, " + _failures.Count + " failed, " +
-                 _hpRestored + " damaged units had HP restored.");
+                 _hpRestored + " damaged units had HP restored, " +
+                 _loaded + "/" + _loadWanted + " passengers/garrisons put back inside.");
             foreach (string f in _failures) Live("  FAILED " + f);
         }
 
         private static void EndBatch()
         {
             _queue = null;
+            _all = null;
+            _spawned = null;
+            _pendingLoads = null;
             _awaiting = false;
             CapturingSpawn = false;
             _db = null;
@@ -382,6 +484,9 @@ namespace BASaveGame
                         typeName = StrOf(line, "\"typeName\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\""),
                         hp = FloatOf(line, "\"hp\":\\s*([-0-9.eE]+)"),
                         maxHp = FloatOf(line, "\"maxHp\":\\s*([-0-9.eE]+)"),
+                        eid = IntOf(line, "\"eid\":\\s*(-?\\d+)"),
+                        inUnit = Regex.IsMatch(line, "\"inUnit\":") ? IntOf(line, "\"inUnit\":\\s*(-?\\d+)") : -1,
+                        inBld = Regex.IsMatch(line, "\"inBld\":") ? IntOf(line, "\"inBld\":\\s*(-?\\d+)") : -1,
                         skin = Regex.IsMatch(line, "\"skin\":") ? IntOf(line, "\"skin\":\\s*(-?\\d+)") : -1,
                         opts = IntsOf(line, "\"opts\":\\s*\\[([^\\]]*)\\]"),
                         ammo = PairsOf(line, "\"ammo\":\\s*\\[((?:\\s*\\[[^\\]]*\\]\\s*,?)*)\\s*\\]"),

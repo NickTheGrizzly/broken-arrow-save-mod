@@ -550,6 +550,79 @@ namespace BASaveGame
             return list;
         }
 
+        // ===== Passengers / garrisons =====
+
+        private const string CargoContainerTypeName = "Il2CppBrokenArrow.Client.Ecs.Transports.Components.CargoContainerComponent";
+        private const string LoadedTypeName = "Il2CppBrokenArrow.Client.Ecs.Transports.Components.LoadedComponent";
+
+        /// <summary>
+        /// Occupant entity id -> the container entity it is inside (vehicle or building segment).
+        /// Built from each CargoContainerComponent.UnitsInside (reference-holding component, reads
+        /// reliably) — NOT from LoadedComponent, a large struct that mis-marshals.
+        /// </summary>
+        private static Dictionary<int, Entity> CargoMap(World world)
+        {
+            var map = new Dictionary<int, Entity>();
+            Type cT = typeof(GameController).Assembly.GetType(CargoContainerTypeName);
+            if (cT == null) return map;
+            foreach (Entity c in EntitiesWith(world, cT))
+            {
+                try
+                {
+                    var cc = ReadComp(world, cT, c.EntityId) as Il2CppBrokenArrow.Client.Ecs.Transports.Components.CargoContainerComponent;
+                    var inside = cc?.UnitsInside;
+                    if (inside == null || inside.Count == 0) continue;
+                    var arr = inside.ToArray();  // FastList.get_Item returns byref — use the array copy
+                    for (int i = 0; i < arr.Length; i++) map[arr[i].EntityId] = c;
+                }
+                catch { }
+            }
+            return map;
+        }
+
+        /// <summary>Live cargo-container entities by id (to re-find a building segment on load).</summary>
+        internal static Dictionary<int, Entity> ContainerEntities()
+        {
+            var result = new Dictionary<int, Entity>();
+            var world = GameController.Instance.GameContext;
+            if (world == null || !EnsureGenericProbe()) return result;
+            Type cT = typeof(GameController).Assembly.GetType(CargoContainerTypeName);
+            if (cT == null) return result;
+            foreach (Entity c in EntitiesWith(world, cT)) result[c.EntityId] = c;
+            return result;
+        }
+
+        internal static bool IsUnit(Entity e)
+        {
+            try { return EntityHas(e, typeof(GameController).Assembly.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.UnitComponent")); }
+            catch { return false; }
+        }
+
+        internal static bool IsLoaded(Entity e)
+        {
+            try { return EntityHas(e, typeof(GameController).Assembly.GetType(LoadedTypeName)); }
+            catch { return false; }
+        }
+
+        /// <summary>True if <paramref name="cargo"/> is in the container's UnitsInside list.</summary>
+        internal static bool IsInside(Entity container, Entity cargo)
+        {
+            try
+            {
+                var world = GameController.Instance.GameContext;
+                if (world == null || !EnsureGenericProbe()) return false;
+                _pools = new Dictionary<Type, PoolView>();
+                Type cT = typeof(GameController).Assembly.GetType(CargoContainerTypeName);
+                var cc = ReadComp(world, cT, container.EntityId) as Il2CppBrokenArrow.Client.Ecs.Transports.Components.CargoContainerComponent;
+                var inside = cc?.UnitsInside;
+                if (inside == null || inside.Count == 0) return false;
+                var arr = inside.ToArray();
+                for (int i = 0; i < arr.Length; i++) if (arr[i].EntityId == cargo.EntityId) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
         // ===== SAVE: write a .basave of the current battle's living units =====
         internal static void WriteQuickSave()
         {
@@ -572,9 +645,15 @@ namespace BASaveGame
             try { gameTime = GameController.Instance.GameTime; } catch { }
 
             var units = EntitiesWith(world, unitT);
+            // Who is inside what (vehicle passengers, building garrisons). Pools must exist first.
+            Dictionary<int, Entity> cargoMap;
+            try { cargoMap = CargoMap(world); }
+            catch (Exception ex) { cargoMap = new Dictionary<int, Entity>(); MelonLogger.Warning("[save] cargo map: " + ex.Message); }
+            int passengers = 0;
+
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"saveVersion\": 2,\n");  // v2: per-unit skin, opts, ammo
+            sb.Append("  \"saveVersion\": 3,\n");  // v2: per-unit skin, opts, ammo; v3: inUnit/inBld
             sb.Append("  \"gameVersion\": \"1.2.0\",\n");
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
@@ -652,6 +731,13 @@ namespace BASaveGame
                 sb.Append(", \"skin\": ").Append(skin);
                 sb.Append(", \"opts\": [").Append(string.Join(", ", optIds)).Append("]");
                 sb.Append(", \"ammo\": [").Append(string.Join(", ", ammo)).Append("]");
+                if (cargoMap.TryGetValue(eid, out Entity container))
+                {
+                    // A unit container refers to another saved unit by eid; anything else is a
+                    // building segment, identified by its entity id (exact within one battle).
+                    sb.Append(IsUnit(container) ? ", \"inUnit\": " : ", \"inBld\": ").Append(container.EntityId);
+                    passengers++;
+                }
                 sb.Append("}");
             }
             sb.Append("\n  ]\n}\n");
@@ -660,7 +746,7 @@ namespace BASaveGame
             {
                 string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
                 File.WriteAllText(path, sb.ToString());
-                MelonLogger.Msg("[save] wrote " + written + " units (skipped " + skippedDead + " dead) -> " + path);
+                MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead) -> " + path);
             }
             catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); }
         }
