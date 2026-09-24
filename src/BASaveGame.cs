@@ -60,7 +60,6 @@ namespace BASaveGame
             catch (Exception e) { LoggerInstance.Warning("PatchAll: " + e.Message); }
             LaunchProbe.Install(HarmonyInstance);  // full-load recon: logs battle launches to live_launch.txt
             LoadFlow.Install(HarmonyInstance);     // F10 full load: world-ready hook + default-spawn suppression
-            MissionState.Install(HarmonyInstance); // tracks the active map sector for saves
 
             _enabled = true;
             LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F10 = LOAD (relaunch saved battle; works from main menu), F12 = spawn all saved units into this battle. Inspector: F7/F8/F9/F11.");
@@ -74,6 +73,7 @@ namespace BASaveGame
             if (!_enabled) return;
             LoadGame.Pump();  // drives an in-progress F12 spawn batch (one unit per frame)
             LoadFlow.Pump();  // drives the F10 post-load stages (restore progress, settle, reconcile)
+            MissionState.Tick();  // hooks the event bus once per battle to track the active map sector
             try
             {
                 if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();

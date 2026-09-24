@@ -2,12 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
-using HarmonyLib;
 using MelonLoader;
 using Il2CppDefaultEcs;
 using Il2CppBrokenArrow.Client.Ecs.Controllers;        // GameController
-using Il2CppBrokenArrow.Client.Ecs.Spawn;              // SpawnUtils
-using Il2CppBrokenArrow.Client.Ecs.UI;                 // SceneTransition
 using Il2CppBrokenArrow.MissionEditor.Systems;         // MissionEntitiesStorageSystem, MissionEntityRecord
 using Il2CppBrokenArrow.MissionEditor.Data.ObjectiveZone; // ObjectiveZoneScript
 using Il2CppBrokenArrow.Shared.Ecs.MissionEditor;      // EcsEventBus
@@ -29,27 +26,51 @@ namespace BASaveGame
         // Last playable zone (map sector) the game activated; -1 = full map; int.MinValue = unknown.
         internal static int ActivePlayableZone = int.MinValue;
 
-        internal static void Install(HarmonyLib.Harmony h)
-        {
-            Patch(h, typeof(SpawnUtils), "OnActivatePlayableZone", nameof(ZoneActivatedPostfix));
-            Patch(h, typeof(SpawnUtils), "OnDeactivatePlayableZone", nameof(ZoneDeactivatedPostfix));
-            Patch(h, typeof(SceneTransition), "ChangeScene", nameof(SceneChangePostfix));
-        }
+        // Active-sector tracking WITHOUT Harmony: patching SpawnUtils.OnActivatePlayableZone (a
+        // private delegate target wired up during scene load) crashed the game natively while the
+        // scenario loaded. Instead we add our own handler to the event-bus delegates, once per
+        // battle, from OnUpdate (main thread, only after the bus has been wired by the game).
+        private static IntPtr _hookedController, _hookedBus;
+        private static float _nextHookCheck;
+        private static Il2CppSystem.Action<int, bool> _onActivate;   // kept alive (GC) for the native side
+        private static Il2CppSystem.Action _onDeactivate;
 
-        private static void Patch(HarmonyLib.Harmony h, Type t, string method, string handler)
+        /// <summary>Called every frame from OnUpdate.</summary>
+        internal static void Tick()
         {
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now < _nextHookCheck) return;
+            _nextHookCheck = now + 0.5f;
             try
             {
-                MethodInfo target = AccessTools.Method(t, method);
-                if (target == null) { MelonLogger.Warning("[mission] patch skip: " + t.Name + "." + method); return; }
-                h.Patch(target, postfix: new HarmonyMethod(typeof(MissionState).GetMethod(handler, BindingFlags.Static | BindingFlags.NonPublic)));
-            }
-            catch (Exception e) { MelonLogger.Warning("[mission] patch FAILED " + t.Name + "." + method + ": " + e.Message); }
-        }
+                if (!GameController.IsInstanceAlive) { _hookedController = _hookedBus = IntPtr.Zero; return; }
+                var gc = GameController.Instance;
+                if (gc == null || gc.Pointer == _hookedController) return;
+                var gp = gc.GetEcsEventBus?.Gameplay;
+                // Wait until the game has wired its own handler, so we append rather than get overwritten.
+                if (gp == null || gp.ActivatePlayableZone == null) return;
 
-        private static void ZoneActivatedPostfix(int uid) { ActivePlayableZone = uid; }
-        private static void ZoneDeactivatedPostfix() { ActivePlayableZone = -1; }
-        private static void SceneChangePostfix() { ActivePlayableZone = int.MinValue; }  // new battle: forget
+                _onActivate ??= Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action<int, bool>>(
+                    new Action<int, bool>((uid, snap) => ActivePlayableZone = uid));
+                _onDeactivate ??= Il2CppInterop.Runtime.DelegateSupport.ConvertDelegate<Il2CppSystem.Action>(
+                    new Action(() => ActivePlayableZone = -1));
+
+                // New battle: forget the previous sector (unless this is the same bus object).
+                if (gp.Pointer != _hookedBus) ActivePlayableZone = int.MinValue;
+                gp.ActivatePlayableZone = Il2CppSystem.Delegate.Combine(gp.ActivatePlayableZone, _onActivate)
+                                              .Cast<Il2CppSystem.Action<int, bool>>();
+                gp.DeactivatePlayableZone = Il2CppSystem.Delegate.Combine(gp.DeactivatePlayableZone, _onDeactivate)
+                                              .Cast<Il2CppSystem.Action>();
+                _hookedController = gc.Pointer;
+                _hookedBus = gp.Pointer;
+                MelonLogger.Msg("[mission] tracking map sector changes for this battle.");
+            }
+            catch (Exception e)
+            {
+                _hookedController = GameController.IsInstanceAlive ? GameController.Instance.Pointer : IntPtr.Zero;  // don't retry every frame
+                MelonLogger.Warning("[mission] sector tracking unavailable: " + e.Message);
+            }
+        }
 
         private static EcsEventBus.GameplayBus Gameplay =>
             GameController.IsInstanceAlive ? GameController.Instance.GetEcsEventBus?.Gameplay : null;
