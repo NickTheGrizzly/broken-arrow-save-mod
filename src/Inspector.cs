@@ -658,6 +658,7 @@ namespace BASaveGame
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
             sb.Append("  \"gameTime\": ").Append(Inv(gameTime)).Append(",\n");
+            sb.Append("  ").Append(LaunchJson(mapName)).Append(",\n");
             sb.Append("  \"units\": [\n");
 
             int written = 0, skippedDead = 0;
@@ -749,6 +750,28 @@ namespace BASaveGame
                 MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead) -> " + path);
             }
             catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); }
+        }
+
+        /// <summary>
+        /// How this battle was launched, so LoadFlow can relaunch it the way the menu does:
+        /// the scenario (SceneLoadManager.LoadScenario), the scene/map, and the player's deck
+        /// (PreloadSharedPlayerDeck.ScenarioStartDeck). One line, for simple parsing.
+        /// </summary>
+        private static string LaunchJson(string mapName)
+        {
+            string scenario = "", folder = "", hash = "", deck = "";
+            try
+            {
+                var src = Il2CppBrokenArrow.Client.Ecs.Utils.ISceneLoadManager.Instance?.LoadScenario
+                          ?? Il2CppBrokenArrow.MissionEditor.MissionResolver.ScenariosService.ActiveScenario;
+                if (src != null) { scenario = src.Name; folder = src.Folder; hash = src.Hash; }
+            }
+            catch (Exception ex) { MelonLogger.Warning("[save] scenario: " + ex.Message); }
+            try { deck = Il2CppBrokenArrow.Client.Ecs.Decks_v2.PreloadSharedPlayerDeck.ScenarioStartDeck?.FileName ?? ""; }
+            catch (Exception ex) { MelonLogger.Warning("[save] deck: " + ex.Message); }
+
+            return "\"launch\": {\"scenario\": \"" + Esc(scenario) + "\", \"folder\": \"" + Esc(folder) +
+                   "\", \"hash\": \"" + Esc(hash) + "\", \"scene\": \"" + Esc(mapName) + "\", \"deck\": \"" + Esc(deck) + "\"}";
         }
 
         private static string Esc(string s)

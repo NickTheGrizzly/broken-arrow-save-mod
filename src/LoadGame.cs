@@ -76,6 +76,13 @@ namespace BASaveGame
 
         // Set by SpawnEntityCapture (UnitBuilder.InitUnitData postfix) while our spawn is in flight.
         internal static bool CapturingSpawn;
+
+        // True only while we call SpawnService.SpawnUnit, so LoadFlow's suppression lets ours through.
+        internal static bool OwnSpawnCall;
+
+        // The Units object we passed in SpawnData: InitUnitData receives it, so the capture only
+        // takes the entity built from OUR data (the game may spawn other units at the same time).
+        internal static IntPtr ExpectedUnitData;
         internal static bool LastSpawnedValid;
         internal static Entity LastSpawned;
 
@@ -204,8 +211,11 @@ namespace BASaveGame
 
                 _countBefore = Inspector.CountUnits();
                 LastSpawnedValid = false;
+                ExpectedUnitData = units.Pointer;
                 CapturingSpawn = true;
-                _awaiter = SpawnService.SpawnUnit(sd, GameController.Instance.UnitLoadScope).GetAwaiter();
+                OwnSpawnCall = true;
+                try { _awaiter = SpawnService.SpawnUnit(sd, GameController.Instance.UnitLoadScope).GetAwaiter(); }
+                finally { OwnSpawnCall = false; }
                 _awaiting = true;
                 _startedAt = Time.realtimeSinceStartup;
                 if (_awaiter.IsCompleted) Finish();  // cached model => completes synchronously
@@ -551,14 +561,17 @@ namespace BASaveGame
 
     // Capture the Entity created for OUR spawn so Finish() can check it's alive. InitUnitData returns
     // the new unit entity and, unlike the async / ref-Entity spawn methods, patches reliably. Gated by
-    // LoadGame.CapturingSpawn (armed only while one of our spawns is in flight) and takes the first
-    // result only. Entity is a small struct, so marshaling __result once per spawn is safe.
+    // LoadGame.CapturingSpawn (armed only while one of our spawns is in flight) and only accepts the
+    // entity built from our own Units object (ExpectedUnitData). Entity is a small struct, so
+    // marshaling __result once per spawn is safe.
     [HarmonyPatch(typeof(UnitBuilder), "InitUnitData")]
     internal static class SpawnEntityCapture
     {
-        private static void Postfix(Entity __result)
+        private static void Postfix(Entity __result, Units unitData)
         {
             if (!LoadGame.CapturingSpawn) return;
+            // Only our own spawn: the game (e.g. a PvE mission script) can spawn units concurrently.
+            if (unitData == null || unitData.Pointer != LoadGame.ExpectedUnitData) return;
             LoadGame.CapturingSpawn = false;
             LoadGame.LastSpawned = __result;
             LoadGame.LastSpawnedValid = true;

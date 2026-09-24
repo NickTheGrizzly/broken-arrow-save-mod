@@ -58,9 +58,11 @@ namespace BASaveGame
 
             try { HarmonyInstance.PatchAll(System.Reflection.Assembly.GetExecutingAssembly()); }
             catch (Exception e) { LoggerInstance.Warning("PatchAll: " + e.Message); }
+            LaunchProbe.Install(HarmonyInstance);  // full-load recon: logs battle launches to live_launch.txt
+            LoadFlow.Install(HarmonyInstance);     // F10 full load: world-ready hook + default-spawn suppression
 
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F12 = spawn all saved units into this battle. Inspector: F7/F8/F9/F11.");
+            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F10 = LOAD (relaunch saved battle; works from main menu), F12 = spawn all saved units into this battle. Inspector: F7/F8/F9/F11.");
         }
 
         private static bool _enabled;
@@ -77,7 +79,7 @@ namespace BASaveGame
                 else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
                 else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
                 else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
-                else if (Input.GetKeyDown(KeyCode.F10)) Inspector.SerializerTest();
+                else if (Input.GetKeyDown(KeyCode.F10)) LoadFlow.Begin();
                 else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
                 else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnAllUnits();
             }
