@@ -62,7 +62,7 @@ namespace BASaveGame
             LoadFlow.Install(HarmonyInstance);     // F10 full load: world-ready hook + default-spawn suppression
 
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F10 = LOAD (relaunch saved battle; works from main menu), F12 = spawn all saved units into this battle. Inspector: F7/F8/F9/F11.");
+            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F10 = LOAD (relaunch saved battle; works from main menu), F12 = spawn all saved units into this battle. F4 = dump mission script. Inspector: F7/F8/F9/F11.");
         }
 
         private static bool _enabled;
@@ -74,9 +74,11 @@ namespace BASaveGame
             LoadGame.Pump();  // drives an in-progress F12 spawn batch (one unit per frame)
             LoadFlow.Pump();  // drives the F10 post-load stages (restore progress, settle, reconcile)
             MissionState.Tick();  // hooks the event bus once per battle to track the active map sector
+            ScriptDump.Tick();    // records mission-script node activity once per battle (recon)
             try
             {
-                if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
+                if (Input.GetKeyDown(KeyCode.F4)) ScriptDump.Dump();
+                else if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
                 else if (Input.GetKeyDown(KeyCode.F6)) LoadGame.DryRun();
                 else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
                 else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
