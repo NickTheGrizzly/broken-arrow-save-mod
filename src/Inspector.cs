@@ -7,6 +7,8 @@ using System.Text;
 using MelonLoader;
 using Il2CppDefaultEcs;
 using Il2CppBrokenArrow.Client.Ecs.Controllers;
+using Il2CppBrokenArrow.Client.Ecs.BattleSystem;             // AmmunitionContainer
+using Il2CppBrokenArrow.Client.Ecs.BattleSystem.Components;  // AmmunitionBoxComponent
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace BASaveGame
@@ -511,6 +513,43 @@ namespace BASaveGame
             catch (Exception ex) { return "describe err: " + ex.Message; }
         }
 
+        // ===== Ammo + options (shared by save and load) =====
+
+        /// <summary>
+        /// A unit's live ammo containers, keyed by ammunition id. AmmunitionBoxComponent is a
+        /// reference-holding component (same kind as UnitComponent, which reads reliably), and
+        /// AmmunitionContainer is a real class — so reads/writes through it hit the live unit.
+        /// </summary>
+        internal static Il2CppSystem.Collections.Generic.Dictionary<int, AmmunitionContainer> ReadAmmoBox(Entity e)
+        {
+            var world = GameController.Instance.GameContext;
+            if (world == null || !EnsureGenericProbe()) return null;
+            _pools = new Dictionary<Type, PoolView>();
+            return AmmoBoxOf(world, e.EntityId);
+        }
+
+        private static Il2CppSystem.Collections.Generic.Dictionary<int, AmmunitionContainer> AmmoBoxOf(World world, int entityId)
+        {
+            var box = ReadComp(world, typeof(AmmunitionBoxComponent), entityId) as AmmunitionBoxComponent;
+            return box?.AmmunitionBox;
+        }
+
+        /// <summary>(ammoId, container) pairs; explicit enumerator (interop dictionaries don't
+        /// reliably bind to C# foreach).</summary>
+        internal static List<KeyValuePair<int, AmmunitionContainer>> AmmoEntries(
+            Il2CppSystem.Collections.Generic.Dictionary<int, AmmunitionContainer> dict)
+        {
+            var list = new List<KeyValuePair<int, AmmunitionContainer>>();
+            if (dict == null) return list;
+            var en = dict.GetEnumerator();
+            while (en.MoveNext())
+            {
+                var kv = en.Current;
+                list.Add(new KeyValuePair<int, AmmunitionContainer>(kv.Key, kv.Value));
+            }
+            return list;
+        }
+
         // ===== SAVE: write a .basave of the current battle's living units =====
         internal static void WriteQuickSave()
         {
@@ -535,7 +574,7 @@ namespace BASaveGame
             var units = EntitiesWith(world, unitT);
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"saveVersion\": 1,\n");
+            sb.Append("  \"saveVersion\": 2,\n");  // v2: per-unit skin, opts, ammo
             sb.Append("  \"gameVersion\": \"1.2.0\",\n");
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
@@ -572,6 +611,33 @@ namespace BASaveGame
                 object pos = Call(tr, "get_position");
                 object rot = Call(tr, "get_rotation");
 
+                // Loadout: option ids + skin, so the load spawns the same configuration (options
+                // change max HP, weapons, etc.). Ammo: exact count per ammunition type.
+                var optIds = new List<int>();
+                int skin = -1;
+                var unitData = ud as Il2CppBrokenArrow.DataBase.Models.Units;
+                try
+                {
+                    if (unitData != null)
+                    {
+                        skin = unitData.CurrentSkinId;
+                        var opts = unitData.CurrentOptions;
+                        if (opts != null)
+                            for (int k = 0; k < opts.Count; k++)
+                                if (opts[k] != null) optIds.Add(opts[k].Id);
+                    }
+                }
+                catch (Exception ex) { MelonLogger.Warning("[save] options for E" + eid + ": " + ex.Message); }
+
+                var ammo = new List<string>();
+                try
+                {
+                    foreach (var kv in AmmoEntries(AmmoBoxOf(world, eid)))
+                        if (kv.Value != null)
+                            ammo.Add("[" + kv.Key + ", " + kv.Value.AmmoQuantity.Value + "]");
+                }
+                catch (Exception ex) { MelonLogger.Warning("[save] ammo for E" + eid + ": " + ex.Message); }
+
                 if (written++ > 0) sb.Append(",\n");
                 sb.Append("    {");
                 sb.Append("\"eid\": ").Append(eid);
@@ -583,6 +649,9 @@ namespace BASaveGame
                 sb.Append(", \"maxHp\": ").Append(Inv(maxHp));
                 sb.Append(", \"pos\": [").Append(Inv(Num(pos, "x"))).Append(", ").Append(Inv(Num(pos, "y"))).Append(", ").Append(Inv(Num(pos, "z"))).Append("]");
                 sb.Append(", \"rot\": [").Append(Inv(Num(rot, "x"))).Append(", ").Append(Inv(Num(rot, "y"))).Append(", ").Append(Inv(Num(rot, "z"))).Append(", ").Append(Inv(Num(rot, "w"))).Append("]");
+                sb.Append(", \"skin\": ").Append(skin);
+                sb.Append(", \"opts\": [").Append(string.Join(", ", optIds)).Append("]");
+                sb.Append(", \"ammo\": [").Append(string.Join(", ", ammo)).Append("]");
                 sb.Append("}");
             }
             sb.Append("\n  ]\n}\n");

@@ -12,8 +12,11 @@ using Il2CppBrokenArrow.Client.Ecs.Spawn;              // SpawnData, SpawnServic
 using Il2CppBrokenArrow.Client.Ecs.Utils;             // PlayerInfo
 using Il2CppBrokenArrow.DataBase.Models;               // Units
 using Il2CppCysharp.Threading.Tasks;                   // UniTask (spawn returns one)
-using Il2CppDefaultEcs;                                 // Entity
+using Il2CppDefaultEcs;                                 // Entity, World, Components<T>
+using Il2CppInterop.Runtime.InteropTypes.Arrays;       // Il2CppStructArray / Il2CppArrayBase
 using UnityEngine;                                     // Vector3, Quaternion, Time
+using HealthComponent = Il2CppBrokenArrow.Client.Ecs.BattleSystem.Components.HealthComponent;
+using AmmunitionContainer = Il2CppBrokenArrow.Client.Ecs.BattleSystem.AmmunitionContainer;
 
 namespace BASaveGame
 {
@@ -35,14 +38,17 @@ namespace BASaveGame
         {
             public int owner, typeId;
             public string typeName;
-            public float hp;
+            public float hp, maxHp;
+            public int skin;                     // -1 = not in save (v1)
+            public int[] opts;                   // option ids; empty for v1 saves
+            public List<KeyValuePair<int, int>> ammo;  // (ammoId, count); empty for v1 saves
             public float[] pos, rot;
         }
 
         // Batch state (F12). Units spawn sequentially: start one, wait for its UniTask, verify,
         // then the next — so each result is unambiguous and entity capture is ours alone.
         private static Queue<Rec> _queue;
-        private static int _index, _total, _ok;
+        private static int _index, _total, _ok, _hpRestored;
         private static List<string> _failures;
         private static DataBaseService _db;
 
@@ -103,6 +109,7 @@ namespace BASaveGame
             _index = 0;
             _total = units.Count;
             _ok = 0;
+            _hpRestored = 0;
             _failures = new List<string>();
             Live("queued " + _total + " units; spawning one per frame...");
         }
@@ -142,7 +149,8 @@ namespace BASaveGame
                 Units units = _db.UnitsLoader.GetNewUnit(r.typeId, false);
                 if (units == null) { Record(false, "no blueprint for typeId " + r.typeId); return; }
 
-                UnitsInfoService.ApplyMods(EmptyOptionIds(), units);
+                // Saved options reproduce the original's loadout (they change max HP, weapons...).
+                UnitsInfoService.ApplyMods(OptionIds(r.opts), units);
                 // Guard for unit types where ApplyMods leaves these unset: a null here is exactly
                 // the address CreateUnitEcs chokes on.
                 if (units.CurrentAudioPreset == null) units.CurrentAudioPreset = units.AudioPreset;
@@ -160,9 +168,9 @@ namespace BASaveGame
                     SpawnerPosition = new Vector3(r.pos[0], r.pos[1], r.pos[2]),
                     RotationY = Yaw(r.rot),
                     IsCostFree = true,
-                    SkinId = units.CurrentSkinId,
-                    AmmoPercent = 100,             // int, defaults to 0 = empty magazines
-                    OptionIds = EmptyOptionIds(),  // stock unit
+                    SkinId = r.skin >= 0 ? r.skin : units.CurrentSkinId,
+                    AmmoPercent = 100,             // int, defaults to 0 = empty; exact counts restored after spawn
+                    OptionIds = OptionIds(r.opts),
                 };
 
                 _countBefore = Inspector.CountUnits();
@@ -197,7 +205,19 @@ namespace BASaveGame
             // The captured entity is the authoritative signal; the unit-count delta is only a
             // fallback (other units can die or deploy between the two counts).
             bool ok = fault == null && (LastSpawnedValid ? alive : delta >= 1);
+
+            // Restore saved damage (spawns come in at full HP). Only for units that were damaged.
+            string hpNote = "";
+            if (ok && LastSpawnedValid && _current.hp > 0f && _current.hp < _current.maxHp - 0.01f)
+            {
+                hpNote = " | " + RestoreHealth(LastSpawned, _current.hp, _current.maxHp);
+                if (hpNote.Contains("->") && !hpNote.Contains("MISMATCH")) _hpRestored++;
+            }
+            if (ok && LastSpawnedValid && _current.ammo != null && _current.ammo.Count > 0)
+                hpNote += " | " + RestoreAmmo(LastSpawned, _current.ammo);
+
             string detail = (LastSpawnedValid ? Inspector.DescribeEntity(LastSpawned) : "entity not captured") +
+                            hpNote +
                             " delta=" + delta +
                             (fault != null ? " fault=" + fault : "") +
                             (ok ? "" : "  <- see GameLogs for the game's error");
@@ -224,7 +244,8 @@ namespace BASaveGame
 
         private static void Summary()
         {
-            Live("spawn all done: " + _ok + "/" + _total + " spawned, " + _failures.Count + " failed.");
+            Live("spawn all done: " + _ok + "/" + _total + " spawned, " + _failures.Count + " failed, " +
+                 _hpRestored + " damaged units had HP restored.");
             foreach (string f in _failures) Live("  FAILED " + f);
         }
 
@@ -236,6 +257,85 @@ namespace BASaveGame
             _db = null;
         }
 
+        /// <summary>
+        /// Write saved HP into a spawned unit's HealthComponent via the pool's REAL backing array
+        /// (Components&lt;T&gt;._components, indexed by _mapping[entityId]). HealthComponent is a small
+        /// blittable struct, so the array indexer reads/writes native memory directly — no
+        /// Entity.Get/Set&lt;T&gt; (byref/in params don't marshal). Guarded: only writes when the live
+        /// MaxHealth matches the saved maxHp, i.e. we're definitely looking at the right element.
+        /// </summary>
+        private static string RestoreHealth(Entity e, float hp, float savedMax)
+        {
+            try
+            {
+                World world = GameController.Instance.GameContext;
+                Components<HealthComponent> comps = world.GetComponents<HealthComponent>();
+                Il2CppStructArray<int> mapping = comps._mapping;
+                Il2CppArrayBase<HealthComponent> arr = comps._components;
+
+                int eid = e.EntityId;
+                if (mapping == null || arr == null) return "hp skip: no pool";
+                if (eid < 0 || eid >= mapping.Length) return "hp skip: entity outside mapping";
+                int idx = mapping[eid];
+                if (idx < 0 || idx >= arr.Length) return "hp skip: bad index " + idx;
+
+                HealthComponent h = arr[idx];
+                string note = "";
+                if (Math.Abs(h.MaxHealth - savedMax) > 0.01f)
+                {
+                    // Loadout differs (e.g. missing option). A modest difference is still the right
+                    // element — keep the damage fraction. A wild one means a bad read: don't write.
+                    float ratio = savedMax > 0f ? h.MaxHealth / savedMax : 0f;
+                    if (ratio < 0.5f || ratio > 2f)
+                        return "hp skip: live MaxHealth " + h.MaxHealth + " vs saved " + savedMax;
+                    note = " scaled: live max " + h.MaxHealth + " vs saved " + savedMax;
+                    hp = hp / savedMax * h.MaxHealth;
+                    savedMax = h.MaxHealth;
+                }
+
+                float before = h._health;
+                try { h.CurrentHealth = hp; }   // game's own setter first
+                catch { h._health = hp; }
+                arr[idx] = h;
+
+                float after = arr[idx]._health;
+                return "hp " + before + "->" + after + " (target " + hp + "/" + savedMax + note + ")" +
+                       (Math.Abs(after - hp) > 0.01f ? " MISMATCH" : "");
+            }
+            catch (Exception ex) { return "hp write threw: " + ex.Message; }
+        }
+
+        /// <summary>
+        /// Set each saved ammo type's count on the spawned unit via the game's own
+        /// AmmunitionContainer.OverrideAmmo (a method on a real object — no struct writes).
+        /// Only lowers counts that differ; clamps to the container's max.
+        /// </summary>
+        private static string RestoreAmmo(Entity e, List<KeyValuePair<int, int>> saved)
+        {
+            try
+            {
+                var box = Inspector.ReadAmmoBox(e);
+                if (box == null) return "ammo skip: no ammo box";
+                int set = 0, same = 0, missing = 0, mismatch = 0;
+                foreach (var s in saved)
+                {
+                    if (!box.ContainsKey(s.Key)) { missing++; continue; }
+                    AmmunitionContainer c = box[s.Key];
+                    if (c == null) { missing++; continue; }
+                    int max = c.MaxAmmoQuantity.Value;
+                    int target = Math.Max(0, Math.Min(s.Value, max));
+                    if (c.AmmoQuantity.Value == target) { same++; continue; }
+                    c.OverrideAmmo(target);
+                    if (c.AmmoQuantity.Value == target) set++; else mismatch++;
+                }
+                if (set + mismatch + missing == 0) return "ammo full";
+                return "ammo set " + set + ", unchanged " + same +
+                       (missing > 0 ? ", " + missing + " type(s) not on unit" : "") +
+                       (mismatch > 0 ? ", " + mismatch + " MISMATCH" : "");
+            }
+            catch (Exception ex) { return "ammo write threw: " + ex.Message; }
+        }
+
         // SpawnData.RotationY is Euler-Y degrees; the save stores a quaternion.
         private static float Yaw(float[] rot)
         {
@@ -243,8 +343,12 @@ namespace BASaveGame
             catch { return 0f; }
         }
 
-        private static Il2CppSystem.Collections.Generic.ICollection<int> EmptyOptionIds() =>
-            new Il2CppSystem.Collections.Generic.List<int>().Cast<Il2CppSystem.Collections.Generic.ICollection<int>>();
+        private static Il2CppSystem.Collections.Generic.ICollection<int> OptionIds(int[] ids)
+        {
+            var list = new Il2CppSystem.Collections.Generic.List<int>();
+            if (ids != null) foreach (int id in ids) list.Add(id);
+            return list.Cast<Il2CppSystem.Collections.Generic.ICollection<int>>();
+        }
 
         private static T GetSvc<T>(string label) where T : Il2CppSystem.Object
         {
@@ -277,6 +381,10 @@ namespace BASaveGame
                         typeId = IntOf(line, "\"typeId\":\\s*(-?\\d+)"),
                         typeName = StrOf(line, "\"typeName\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\""),
                         hp = FloatOf(line, "\"hp\":\\s*([-0-9.eE]+)"),
+                        maxHp = FloatOf(line, "\"maxHp\":\\s*([-0-9.eE]+)"),
+                        skin = Regex.IsMatch(line, "\"skin\":") ? IntOf(line, "\"skin\":\\s*(-?\\d+)") : -1,
+                        opts = IntsOf(line, "\"opts\":\\s*\\[([^\\]]*)\\]"),
+                        ammo = PairsOf(line, "\"ammo\":\\s*\\[((?:\\s*\\[[^\\]]*\\]\\s*,?)*)\\s*\\]"),
                         pos = ArrOf(line, "\"pos\":\\s*\\[([^\\]]+)\\]", 3),
                         rot = ArrOf(line, "\"rot\":\\s*\\[([^\\]]+)\\]", 4),
                     });
@@ -291,6 +399,26 @@ namespace BASaveGame
         { var m = Regex.Match(s, pat); return m.Success ? int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0; }
         private static float FloatOf(string s, string pat)
         { var m = Regex.Match(s, pat); return m.Success ? float.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture) : 0f; }
+        private static int[] IntsOf(string s, string pat)
+        {
+            var m = Regex.Match(s, pat);
+            var outv = new List<int>();
+            if (m.Success)
+                foreach (string part in m.Groups[1].Value.Split(','))
+                    if (int.TryParse(part.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)) outv.Add(v);
+            return outv.ToArray();
+        }
+        private static List<KeyValuePair<int, int>> PairsOf(string s, string pat)
+        {
+            var outv = new List<KeyValuePair<int, int>>();
+            var m = Regex.Match(s, pat);
+            if (!m.Success) return outv;
+            foreach (Match p in Regex.Matches(m.Groups[1].Value, "\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\]"))
+                outv.Add(new KeyValuePair<int, int>(
+                    int.Parse(p.Groups[1].Value, CultureInfo.InvariantCulture),
+                    int.Parse(p.Groups[2].Value, CultureInfo.InvariantCulture)));
+            return outv;
+        }
         private static string StrOf(string s, string pat)
         { var m = Regex.Match(s, pat); return m.Success ? m.Groups[1].Value : "?"; }
         private static float[] ArrOf(string s, string pat, int n)
