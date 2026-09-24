@@ -44,6 +44,7 @@ namespace BASaveGame
             public List<KeyValuePair<int, int>> ammo;  // (ammoId, count); empty for v1 saves
             public int eid;                      // entity id at save time (links passengers to vehicles)
             public int inUnit, inBld;            // container: saved unit eid / building entity id; -1 = none
+            public string grp;                   // mission-script group names at save time ("" = none)
             public float[] pos, rot;
         }
 
@@ -356,7 +357,21 @@ namespace BASaveGame
                  _hpRestored + " damaged units had HP restored, " +
                  _loaded + "/" + _loadWanted + " passengers/garrisons put back inside.");
             foreach (string f in _failures) Live("  FAILED " + f);
+
+            // Hand the results to whoever started the batch (LoadFlow's mission steps). One-shot.
+            var done = BatchDone;
+            BatchDone = null;
+            if (done != null)
+            {
+                var groups = new Dictionary<int, string>();
+                foreach (Rec r in _all) if (!string.IsNullOrEmpty(r.grp)) groups[r.eid] = r.grp;
+                try { done(new Dictionary<int, Entity>(_spawned), groups); }
+                catch (Exception e) { Live("BatchDone threw: " + e.Message); }
+            }
         }
+
+        /// <summary>Called once when the next spawn batch finishes: (saved eid -> new entity, saved eid -> groups).</summary>
+        internal static Action<Dictionary<int, Entity>, Dictionary<int, string>> BatchDone;
 
         private static void EndBatch()
         {
@@ -497,6 +512,7 @@ namespace BASaveGame
                         eid = IntOf(line, "\"eid\":\\s*(-?\\d+)"),
                         inUnit = Regex.IsMatch(line, "\"inUnit\":") ? IntOf(line, "\"inUnit\":\\s*(-?\\d+)") : -1,
                         inBld = Regex.IsMatch(line, "\"inBld\":") ? IntOf(line, "\"inBld\":\\s*(-?\\d+)") : -1,
+                        grp = Unescape(StrOf(line, "\"grp\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")),
                         skin = Regex.IsMatch(line, "\"skin\":") ? IntOf(line, "\"skin\":\\s*(-?\\d+)") : -1,
                         opts = IntsOf(line, "\"opts\":\\s*\\[([^\\]]*)\\]"),
                         ammo = PairsOf(line, "\"ammo\":\\s*\\[((?:\\s*\\[[^\\]]*\\]\\s*,?)*)\\s*\\]"),
@@ -534,6 +550,9 @@ namespace BASaveGame
                     int.Parse(p.Groups[2].Value, CultureInfo.InvariantCulture)));
             return outv;
         }
+        private static string Unescape(string s) =>
+            s == "?" ? "" : s.Replace("\\\"", "\"").Replace("\\\\", "\\");
+
         private static string StrOf(string s, string pat)
         { var m = Regex.Match(s, pat); return m.Success ? m.Groups[1].Value : "?"; }
         private static float[] ArrOf(string s, string pat, int n)

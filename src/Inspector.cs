@@ -650,10 +650,13 @@ namespace BASaveGame
             try { cargoMap = CargoMap(world); }
             catch (Exception ex) { cargoMap = new Dictionary<int, Entity>(); MelonLogger.Warning("[save] cargo map: " + ex.Message); }
             int passengers = 0;
+            // Mission identity (uid + script groups) per unit, and the owners for the economy snapshot.
+            var missionIds = MissionState.UnitIds();
+            var owners = new HashSet<int>();
 
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"saveVersion\": 3,\n");  // v2: per-unit skin, opts, ammo; v3: inUnit/inBld
+            sb.Append("  \"saveVersion\": 4,\n");  // v2: skin/opts/ammo; v3: inUnit/inBld; v4: uid/grp + mission line
             sb.Append("  \"gameVersion\": \"1.2.0\",\n");
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
@@ -739,9 +742,12 @@ namespace BASaveGame
                     sb.Append(IsUnit(container) ? ", \"inUnit\": " : ", \"inBld\": ").Append(container.EntityId);
                     passengers++;
                 }
+                if (missionIds.TryGetValue(eid, out var mid))
+                    sb.Append(", \"uid\": ").Append(mid.Key).Append(", \"grp\": \"").Append(Esc(mid.Value)).Append("\"");
+                owners.Add(owner);
                 sb.Append("}");
             }
-            sb.Append("\n  ]\n}\n");
+            sb.Append("\n  ],\n  ").Append(MissionState.MissionJson(owners)).Append("\n}\n");
 
             try
             {

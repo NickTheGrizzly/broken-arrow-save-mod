@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Text.RegularExpressions;
@@ -31,9 +32,29 @@ namespace BASaveGame
     /// </summary>
     internal static class LoadFlow
     {
-        /// <summary>True from our relaunch until the world is ready: suppress non-mod spawns.</summary>
+        /// <summary>True from our relaunch until the world is ready.</summary>
         internal static bool Pending;
         internal static int Suppressed;
+
+        // Option 1 ("replay progression") lets the scenario start normally so its mission script
+        // and groups exist, then reconciles. Suppressing default spawns is off; kept as a switch.
+        private const bool SuppressDefaults = false;
+
+        // After world ready: wait for the mission script to start, restore progress, let the
+        // script react (unlock sectors, spawn its waves), then spawn the saved army and reconcile.
+        private enum Stage { Idle, WaitScript, Settle, Spawning }
+        private static Stage _stage = Stage.Idle;
+        private static float _stageAt;
+        private const float ScriptStartDelay = 3f, SettleSeconds = 8f;
+        private static SavedMission _mission;
+
+        private struct SavedMission
+        {
+            public float gameTime;
+            public int? playZone;
+            public List<KeyValuePair<int, int>> zones;
+            public List<float[]> money;
+        }
 
         private struct Launch { public string scenario, folder, hash, scene, deck; }
 
@@ -91,15 +112,57 @@ namespace BASaveGame
             Pending = false;
             int units = -1;
             try { units = Inspector.CountUnits(); } catch { }
-            Log("world ready: suppressed " + Suppressed + " default spawn(s); units on map now: " + units + ". Spawning saved army...");
-            LoadGame.SpawnAllUnits();
+            Log("world ready: suppressed " + Suppressed + " default spawn(s); units on map now: " + units +
+                ". Waiting " + ScriptStartDelay + "s for the mission script before restoring progress...");
+            _mission = ReadMission();
+            _stage = Stage.WaitScript;
+            _stageAt = UnityEngine.Time.realtimeSinceStartup;
+        }
+
+        /// <summary>Called every frame from OnUpdate: drives the post-world-ready load stages.</summary>
+        internal static void Pump()
+        {
+            if (_stage == Stage.Idle || _stage == Stage.Spawning) return;
+            if (!GameController.IsInstanceAlive) { Log("battle ended during load; stopping"); _stage = Stage.Idle; return; }
+            float now = UnityEngine.Time.realtimeSinceStartup;
+
+            if (_stage == Stage.WaitScript && now - _stageAt >= ScriptStartDelay)
+            {
+                Log("restoring mission progress...");
+                MissionState.RestoreProgress(_mission.gameTime, _mission.playZone, _mission.zones, Log);
+                Log("letting the mission script settle for " + SettleSeconds + "s...");
+                _stage = Stage.Settle;
+                _stageAt = now;
+            }
+            else if (_stage == Stage.Settle && now - _stageAt >= SettleSeconds)
+            {
+                Log("spawning saved army (units on map now: " + Inspector.CountUnits() + ")...");
+                _stage = Stage.Spawning;
+                LoadGame.BatchDone = OnArmySpawned;
+                LoadGame.SpawnAllUnits();
+            }
+        }
+
+        // After the saved army is in: put restored units back in their mission groups FIRST (so the
+        // script still sees those groups alive), then make every other mission unit disappear.
+        private static void OnArmySpawned(Dictionary<int, Il2CppDefaultEcs.Entity> spawned, Dictionary<int, string> groups)
+        {
+            _stage = Stage.Idle;
+            MissionState.AssignGroups(spawned, groups, Log);
+            MissionState.RemoveAllExcept(spawned.Values, Log);
+            if (_mission.money != null && _mission.money.Count > 0)
+            {
+                Log("restoring money:");
+                MissionState.RestoreMoney(_mission.money, Log);
+            }
+            Log("==== load complete ====");
         }
 
         // Skip every spawn that isn't ours while a load is pending (returns an already-completed
-        // task so callers awaiting it just continue).
+        // task so callers awaiting it just continue). Disabled while SuppressDefaults is false.
         private static bool SuppressSpawnPrefix(ref UniTask __result)
         {
-            if (!Pending || LoadGame.OwnSpawnCall) return true;
+            if (!SuppressDefaults || !Pending || LoadGame.OwnSpawnCall) return true;
             Suppressed++;
             __result = UniTask.CompletedTask;
             return false;
@@ -191,6 +254,42 @@ namespace BASaveGame
             Log("save has no launch info — press F5 in a battle with this build to re-save");
             return null;
         }
+
+        private static SavedMission ReadMission()
+        {
+            var m = new SavedMission { zones = new List<KeyValuePair<int, int>>(), money = new List<float[]>() };
+            try
+            {
+                string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    var gt = Regex.Match(line, "\"gameTime\":\\s*([-0-9.eE]+)");
+                    if (gt.Success) float.TryParse(gt.Groups[1].Value, System.Globalization.NumberStyles.Float,
+                                                   System.Globalization.CultureInfo.InvariantCulture, out m.gameTime);
+                    if (line.IndexOf("\"mission\"", StringComparison.Ordinal) < 0) continue;
+
+                    var pz = Regex.Match(line, "\"playZone\":\\s*(-?\\d+)");
+                    if (pz.Success) m.playZone = int.Parse(pz.Groups[1].Value);
+
+                    var zs = Regex.Match(line, "\"zones\":\\s*\\[(.*?)\\]\\s*,\\s*\"money\"");
+                    if (zs.Success)
+                        foreach (Match p in Regex.Matches(zs.Groups[1].Value, "\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\]"))
+                            m.zones.Add(new KeyValuePair<int, int>(int.Parse(p.Groups[1].Value), int.Parse(p.Groups[2].Value)));
+
+                    var ms = Regex.Match(line, "\"money\":\\s*\\[(.*)\\]\\s*\\}");
+                    if (ms.Success)
+                        foreach (Match p in Regex.Matches(ms.Groups[1].Value, "\\[\\s*(-?\\d+)\\s*,\\s*([^,\\]]+)\\s*,\\s*([^,\\]]+)\\s*\\]"))
+                            m.money.Add(new[] { Num(p.Groups[1].Value), Num(p.Groups[2].Value), Num(p.Groups[3].Value) });
+                }
+            }
+            catch (Exception e) { Log("reading mission state threw: " + e.Message); }
+            Log("save mission: gameTime=" + m.gameTime.ToString("0.0") + " playZone=" + (m.playZone?.ToString() ?? "unknown") +
+                " zones=" + m.zones.Count + " players=" + m.money.Count);
+            return m;
+        }
+
+        private static float Num(string s) =>
+            float.TryParse(s.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float f) ? f : float.NaN;
 
         private static string Str(string line, string key)
         {
