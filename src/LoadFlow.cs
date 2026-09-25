@@ -36,25 +36,22 @@ namespace BASaveGame
         internal static bool Pending;
         internal static int Suppressed;
 
-        // Option 1 ("replay progression") lets the scenario start normally so its mission script
-        // and groups exist, then reconciles. Suppressing default spawns is off; kept as a switch.
-        private const bool SuppressDefaults = false;
+        // Every spawn that isn't ours is skipped from the relaunch until the restore is complete:
+        // the script's start-up (and anything it reacts to while we restore) must not add units.
+        // The saved army IS the mission's unit state, re-registered under its saved mission uids.
+        private static bool _suppressing;
 
-        // After world ready: wait for the mission script to start, restore progress, let the
-        // script react (unlock sectors, spawn its waves), then spawn the saved army and reconcile.
-        private enum Stage { Idle, WaitScript, Settle, Spawning }
+        // After world ready (the script has run its start-up chain):
+        //   Start    -> game time, capture-zone owners (script listeners may react)
+        //   Zones    -> [settle] stop every node the fresh start left running, spawn the saved army
+        //   Spawning -> [batch done] node state, effect journal, money, resume running nodes, done
+        private enum Stage { Idle, Start, Zones, Spawning }
         private static Stage _stage = Stage.Idle;
         private static float _stageAt;
-        private const float ScriptStartDelay = 3f, SettleSeconds = 8f;
-        private static SavedMission _mission;
-
-        private struct SavedMission
-        {
-            public float gameTime;
-            public int? playZone;
-            public List<KeyValuePair<int, int>> zones;
-            public List<float[]> money;
-        }
+        private const float StartDelay = 1.5f, ZoneSettle = 2f;
+        private static MissionState.Saved _mission;
+        private static ScriptState.Saved _script;
+        private static DeckState.Saved _deck;
 
         private struct Launch { public string scenario, folder, hash, scene, deck; }
 
@@ -97,11 +94,12 @@ namespace BASaveGame
                 var transition = ISceneTransition.Instance;
                 if (transition == null) { Log("abort: ISceneTransition.Instance is null"); return; }
                 Pending = true;
+                _suppressing = true;
                 Suppressed = 0;
                 transition.ChangeScene(src, launch.scene, false, null, null, null, default(ChangeSceneExtraOptions));
                 Log("ChangeScene issued; default units will be suppressed until the world is ready");
             }
-            catch (Exception e) { Pending = false; Log("abort: ChangeScene threw: " + e.Message); }
+            catch (Exception e) { Pending = false; _suppressing = false; Log("abort: ChangeScene threw: " + e.Message); }
         }
 
         // ---- hooks ----
@@ -112,10 +110,15 @@ namespace BASaveGame
             Pending = false;
             int units = -1;
             try { units = Inspector.CountUnits(); } catch { }
-            Log("world ready: suppressed " + Suppressed + " default spawn(s); units on map now: " + units +
-                ". Waiting " + ScriptStartDelay + "s for the mission script before restoring progress...");
-            _mission = ReadMission();
-            _stage = Stage.WaitScript;
+            Log("world ready: suppressed " + Suppressed + " default spawn(s) so far; units on map: " + units + ".");
+            if (!ReadState())
+            {
+                Log("no mission state in the save: spawning the saved army only");
+                _stage = Stage.Zones;
+                _stageAt = -999f;
+                return;
+            }
+            _stage = Stage.Start;
             _stageAt = UnityEngine.Time.realtimeSinceStartup;
         }
 
@@ -123,46 +126,71 @@ namespace BASaveGame
         internal static void Pump()
         {
             if (_stage == Stage.Idle || _stage == Stage.Spawning) return;
-            if (!GameController.IsInstanceAlive) { Log("battle ended during load; stopping"); _stage = Stage.Idle; return; }
+            if (!GameController.IsInstanceAlive) { Log("battle ended during load; stopping"); Finish(); return; }
             float now = UnityEngine.Time.realtimeSinceStartup;
 
-            if (_stage == Stage.WaitScript && now - _stageAt >= ScriptStartDelay)
+            if (_stage == Stage.Start && now - _stageAt >= StartDelay)
             {
-                Log("restoring mission progress...");
-                MissionState.RestoreProgress(_mission.gameTime, _mission.playZone, _mission.zones, Log);
-                Log("letting the mission script settle for " + SettleSeconds + "s...");
-                _stage = Stage.Settle;
+                Log("restoring world state...");
+                MissionState.RestoreGameTime(_mission.gameTime, Log);
+                MissionState.RestoreZones(_mission.zones, Log);
+                _stage = Stage.Zones;
                 _stageAt = now;
             }
-            else if (_stage == Stage.Settle && now - _stageAt >= SettleSeconds)
+            else if (_stage == Stage.Zones && now - _stageAt >= ZoneSettle)
             {
-                Log("spawning saved army (units on map now: " + Inspector.CountUnits() + ")...");
+                if (_script != null) ScriptState.CancelRunning(Log);
+                Log("spawning saved army as mission units (units on map now: " + Inspector.CountUnits() + ", suppressed so far: " + Suppressed + ")...");
                 _stage = Stage.Spawning;
+                LoadGame.NativeUids = true;
                 LoadGame.BatchDone = OnArmySpawned;
                 LoadGame.SpawnAllUnits();
             }
         }
 
-        // After the saved army is in: put restored units back in their mission groups FIRST (so the
-        // script still sees those groups alive), then make every other mission unit disappear.
         private static void OnArmySpawned(Dictionary<int, Il2CppDefaultEcs.Entity> spawned, Dictionary<int, string> groups)
         {
-            _stage = Stage.Idle;
-            MissionState.AssignGroups(spawned, groups, Log);
-            MissionState.RemoveAllExcept(spawned.Values, Log);
-            if (_mission.money != null && _mission.money.Count > 0)
+            LoadGame.NativeUids = false;
+            try
             {
-                Log("restoring money:");
-                MissionState.RestoreMoney(_mission.money, Log);
+                int dupes = MissionState.DuplicateUids();
+                Log("mission uids: " + LoadGame.UidReport + (dupes > 0 ? "; WARNING " + dupes + " duplicate uid(s)" : ""));
+                var unbound = LoadGame.UnboundSpawned(spawned);
+                if (unbound.Count > 0) MissionState.AssignGroups(unbound, groups, Log);  // fallback where the uid didn't take
+                MissionState.RemoveAllExcept(spawned.Values, Log);        // anything that slipped past suppression
+
+                // World effects first: anything the script does in reaction is overwritten by the
+                // node restore that follows.
+                if (_mission != null) MissionState.ReplayJournal(_mission, Log);
+
+                List<Il2CppBrokenArrow.ScriptEngine.Core.NodeCore> resume = null;
+                if (_script != null)
+                {
+                    ScriptState.CancelRunning(Log);                       // again: our spawns/zones/journal may have woken nodes
+                    resume = ScriptState.Restore(_script, Log);
+                }
+                if (_mission != null && _mission.money.Count > 0) { Log("restoring money:"); MissionState.RestoreMoney(_mission.money, Log); }
+                if (_deck != null) DeckState.Restore(_deck, Log);
+                if (resume != null && resume.Count > 0) ScriptState.Resume(resume, _script.gameTime, Log);
             }
-            Log("==== load complete ====");
+            catch (Exception e) { Log("restore threw: " + e); }
+            Finish();
+            Log("==== load complete (spawns suppressed during load: " + Suppressed + ") ====");
         }
 
-        // Skip every spawn that isn't ours while a load is pending (returns an already-completed
-        // task so callers awaiting it just continue). Disabled while SuppressDefaults is false.
+        private static void Finish()
+        {
+            _stage = Stage.Idle;
+            _suppressing = false;
+            Pending = false;
+            LoadGame.NativeUids = false;
+        }
+
+        // Skip every spawn that isn't ours while a load is in progress (returns an already-completed
+        // task so callers awaiting it just continue).
         private static bool SuppressSpawnPrefix(ref UniTask __result)
         {
-            if (!SuppressDefaults || !Pending || LoadGame.OwnSpawnCall) return true;
+            if (!_suppressing || LoadGame.OwnSpawnCall) return true;
             Suppressed++;
             __result = UniTask.CompletedTask;
             return false;
@@ -255,41 +283,28 @@ namespace BASaveGame
             return null;
         }
 
-        private static SavedMission ReadMission()
+        /// <summary>Parse mission + script state from the save. False when the save has neither.</summary>
+        private static bool ReadState()
         {
-            var m = new SavedMission { zones = new List<KeyValuePair<int, int>>(), money = new List<float[]>() };
+            _mission = null;
+            _script = null;
+            _deck = null;
             try
             {
                 string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
-                foreach (string line in File.ReadAllLines(path))
-                {
-                    var gt = Regex.Match(line, "\"gameTime\":\\s*([-0-9.eE]+)");
-                    if (gt.Success) float.TryParse(gt.Groups[1].Value, System.Globalization.NumberStyles.Float,
-                                                   System.Globalization.CultureInfo.InvariantCulture, out m.gameTime);
-                    if (line.IndexOf("\"mission\"", StringComparison.Ordinal) < 0) continue;
-
-                    var pz = Regex.Match(line, "\"playZone\":\\s*(-?\\d+)");
-                    if (pz.Success) m.playZone = int.Parse(pz.Groups[1].Value);
-
-                    var zs = Regex.Match(line, "\"zones\":\\s*\\[(.*?)\\]\\s*,\\s*\"money\"");
-                    if (zs.Success)
-                        foreach (Match p in Regex.Matches(zs.Groups[1].Value, "\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*\\]"))
-                            m.zones.Add(new KeyValuePair<int, int>(int.Parse(p.Groups[1].Value), int.Parse(p.Groups[2].Value)));
-
-                    var ms = Regex.Match(line, "\"money\":\\s*\\[(.*)\\]\\s*\\}");
-                    if (ms.Success)
-                        foreach (Match p in Regex.Matches(ms.Groups[1].Value, "\\[\\s*(-?\\d+)\\s*,\\s*([^,\\]]+)\\s*,\\s*([^,\\]]+)\\s*\\]"))
-                            m.money.Add(new[] { Num(p.Groups[1].Value), Num(p.Groups[2].Value), Num(p.Groups[3].Value) });
-                }
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+                _mission = MissionState.Parse(root);
+                _script = ScriptState.Parse(root);
+                _deck = DeckState.Parse(root);
+                Log("save state: gameTime=" + _mission.gameTime.ToString("0.0") + " zones=" + _mission.zones.Count +
+                    " players=" + _mission.money.Count + " journal=" + _mission.journal.Count +
+                    " scriptNodes=" + (_script != null ? _script.nodes.Count.ToString() : "none") +
+                    " deckEntries=" + (_deck != null ? (_deck.used.Count + _deck.left.Count).ToString() : "none"));
+                return _script != null || _deck != null || _mission.zones.Count > 0 || _mission.journal.Count > 0 || _mission.legacyPlayZone.HasValue;
             }
-            catch (Exception e) { Log("reading mission state threw: " + e.Message); }
-            Log("save mission: gameTime=" + m.gameTime.ToString("0.0") + " playZone=" + (m.playZone?.ToString() ?? "unknown") +
-                " zones=" + m.zones.Count + " players=" + m.money.Count);
-            return m;
+            catch (Exception e) { Log("reading save state threw: " + e.Message); return false; }
         }
-
-        private static float Num(string s) =>
-            float.TryParse(s.Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float f) ? f : float.NaN;
 
         private static string Str(string line, string key)
         {

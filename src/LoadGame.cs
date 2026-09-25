@@ -45,6 +45,7 @@ namespace BASaveGame
             public int eid;                      // entity id at save time (links passengers to vehicles)
             public int inUnit, inBld;            // container: saved unit eid / building entity id; -1 = none
             public string grp;                   // mission-script group names at save time ("" = none)
+            public int uid;                      // mission uid at save time; 0 = none
             public float[] pos, rot;
         }
 
@@ -209,6 +210,13 @@ namespace BASaveGame
                     AmmoPercent = 100,             // int, defaults to 0 = empty; exact counts restored after spawn
                     OptionIds = OptionIds(r.opts),
                 };
+                // Full load: respawn as the SAME mission unit (uid + groups), the way the script's
+                // own spawn nodes do, so every UnitObject in the restored script still points at it.
+                if (NativeUids && r.uid > 0)
+                {
+                    sd.UID = r.uid;
+                    if (!string.IsNullOrEmpty(r.grp)) sd.Groups = r.grp;
+                }
 
                 _countBefore = Inspector.CountUnits();
                 LastSpawnedValid = false;
@@ -373,6 +381,50 @@ namespace BASaveGame
         /// <summary>Called once when the next spawn batch finishes: (saved eid -> new entity, saved eid -> groups).</summary>
         internal static Action<Dictionary<int, Entity>, Dictionary<int, string>> BatchDone;
 
+        /// <summary>Set by LoadFlow during a full load: spawn units under their saved mission uid/groups.</summary>
+        internal static bool NativeUids;
+
+        /// <summary>Spawned units whose saved uid did NOT end up bound to them (need group reassignment).</summary>
+        internal static Dictionary<int, Entity> UnboundSpawned(Dictionary<int, Entity> spawned)
+        {
+            var result = new Dictionary<int, Entity>();
+            var data = Il2CppBrokenArrow.MissionEditor.Systems.MissionEntitiesStorageSystem._data;
+            var uidByEid = new Dictionary<int, int>();
+            if (_all != null) foreach (Rec r in _all) uidByEid[r.eid] = r.uid;
+            foreach (var kv in spawned)
+            {
+                uidByEid.TryGetValue(kv.Key, out int uid);
+                Il2CppBrokenArrow.MissionEditor.Systems.MissionEntityRecord rec = null;
+                try { if (uid > 0 && data != null) data.TryGetValue(uid, out rec); } catch { }
+                if (rec == null || rec.Entity.EntityId != kv.Value.EntityId) result[kv.Key] = kv.Value;
+            }
+            return result;
+        }
+
+        /// <summary>After a batch: how many saved uids ended up registered to the unit we spawned.</summary>
+        internal static string UidReport
+        {
+            get
+            {
+                if (_all == null || _spawned == null) return "no batch";
+                int wanted = 0, bound = 0, other = 0, missing = 0;
+                var data = Il2CppBrokenArrow.MissionEditor.Systems.MissionEntitiesStorageSystem._data;
+                foreach (Rec r in _all)
+                {
+                    if (r.uid <= 0 || !_spawned.TryGetValue(r.eid, out Entity e)) continue;
+                    wanted++;
+                    Il2CppBrokenArrow.MissionEditor.Systems.MissionEntityRecord rec = null;
+                    try { if (data != null && data.TryGetValue(r.uid, out rec) && rec != null) { } } catch { }
+                    if (rec == null) missing++;
+                    else if (rec.Entity.EntityId == e.EntityId) bound++;
+                    else other++;
+                }
+                return bound + "/" + wanted + " saved uids bound to the respawned unit" +
+                       (other > 0 ? ", " + other + " bound to another entity" : "") +
+                       (missing > 0 ? ", " + missing + " not registered" : "");
+            }
+        }
+
         private static void EndBatch()
         {
             _queue = null;
@@ -470,7 +522,7 @@ namespace BASaveGame
             catch { return 0f; }
         }
 
-        private static Il2CppSystem.Collections.Generic.ICollection<int> OptionIds(int[] ids)
+        internal static Il2CppSystem.Collections.Generic.ICollection<int> OptionIds(int[] ids)
         {
             var list = new Il2CppSystem.Collections.Generic.List<int>();
             if (ids != null) foreach (int id in ids) list.Add(id);
@@ -513,6 +565,7 @@ namespace BASaveGame
                         inUnit = Regex.IsMatch(line, "\"inUnit\":") ? IntOf(line, "\"inUnit\":\\s*(-?\\d+)") : -1,
                         inBld = Regex.IsMatch(line, "\"inBld\":") ? IntOf(line, "\"inBld\":\\s*(-?\\d+)") : -1,
                         grp = Unescape(StrOf(line, "\"grp\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")),
+                        uid = Regex.IsMatch(line, "\"uid\":") ? IntOf(line, "\"uid\":\\s*(-?\\d+)") : 0,
                         skin = Regex.IsMatch(line, "\"skin\":") ? IntOf(line, "\"skin\":\\s*(-?\\d+)") : -1,
                         opts = IntsOf(line, "\"opts\":\\s*\\[([^\\]]*)\\]"),
                         ammo = PairsOf(line, "\"ammo\":\\s*\\[((?:\\s*\\[[^\\]]*\\]\\s*,?)*)\\s*\\]"),

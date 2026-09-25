@@ -656,7 +656,7 @@ namespace BASaveGame
 
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"saveVersion\": 4,\n");  // v2: skin/opts/ammo; v3: inUnit/inBld; v4: uid/grp + mission line
+            sb.Append("  \"saveVersion\": 5,\n");  // v2: skin/opts/ammo; v3: inUnit/inBld; v4: uid/grp + mission; v5: script state + effect journal
             sb.Append("  \"gameVersion\": \"1.2.0\",\n");
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
@@ -747,13 +747,30 @@ namespace BASaveGame
                 owners.Add(owner);
                 sb.Append("}");
             }
-            sb.Append("\n  ],\n  ").Append(MissionState.MissionJson(owners)).Append("\n}\n");
+            sb.Append("\n  ],\n  ").Append(MissionState.MissionJson(owners));
+            int scriptNodes = 0;
+            try
+            {
+                string script = ScriptState.CaptureJson(out scriptNodes);
+                if (script != null) sb.Append(",\n  ").Append(script);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[save] script state: " + ex.Message); }
+            try
+            {
+                string deck = DeckState.CaptureJson();
+                if (deck != null) sb.Append(",\n  ").Append(deck);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[save] deck usage: " + ex.Message); }
+            sb.Append("\n}\n");
+            int dupes = MissionState.DuplicateUids();
+            if (dupes > 0) MelonLogger.Warning("[save] " + dupes + " live units share a mission uid with another unit (uid collision after a load?)");
 
             try
             {
                 string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
                 File.WriteAllText(path, sb.ToString());
-                MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead) -> " + path);
+                MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead), " +
+                                scriptNodes + " mission-script nodes -> " + path);
             }
             catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); }
         }
