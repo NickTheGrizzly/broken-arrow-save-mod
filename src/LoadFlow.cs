@@ -52,6 +52,7 @@ namespace BASaveGame
         private static MissionState.Saved _mission;
         private static ScriptState.Saved _script;
         private static DeckState.Saved _deck;
+        private static GameModeState.Saved _gameMode;
 
         private struct Launch { public string scenario, folder, hash, scene, deck; }
 
@@ -171,6 +172,7 @@ namespace BASaveGame
                 }
                 if (_mission != null && _mission.money.Count > 0) { Log("restoring money:"); MissionState.RestoreMoney(_mission.money, Log); }
                 if (_deck != null) DeckState.Restore(_deck, Log);
+                if (_gameMode != null) GameModeState.Restore(_gameMode, _mission?.zones, Log);
                 if (resume != null && resume.Count > 0) ScriptState.Resume(resume, _script.gameTime, Log);
             }
             catch (Exception e) { Log("restore threw: " + e); }
@@ -289,6 +291,7 @@ namespace BASaveGame
             _mission = null;
             _script = null;
             _deck = null;
+            _gameMode = null;
             try
             {
                 string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
@@ -297,11 +300,14 @@ namespace BASaveGame
                 _mission = MissionState.Parse(root);
                 _script = ScriptState.Parse(root);
                 _deck = DeckState.Parse(root);
+                _gameMode = GameModeState.Parse(root);
                 Log("save state: gameTime=" + _mission.gameTime.ToString("0.0") + " zones=" + _mission.zones.Count +
                     " players=" + _mission.money.Count + " journal=" + _mission.journal.Count +
                     " scriptNodes=" + (_script != null ? _script.nodes.Count.ToString() : "none") +
-                    " deckEntries=" + (_deck != null ? (_deck.used.Count + _deck.left.Count).ToString() : "none"));
-                return _script != null || _deck != null || _mission.zones.Count > 0 || _mission.journal.Count > 0 || _mission.legacyPlayZone.HasValue;
+                    " deckEntries=" + (_deck != null ? (_deck.used.Count + _deck.left.Count).ToString() : "none") +
+                    " refunds=" + (_deck != null ? _deck.refunds.Count.ToString() : "none") +
+                    " gameMode=" + (_gameMode != null ? ((Il2CppNetworkCommon.Enums.GameModeType)_gameMode.type).ToString() : "none"));
+                return _script != null || _deck != null || _gameMode != null || _mission.zones.Count > 0 || _mission.journal.Count > 0 || _mission.legacyPlayZone.HasValue;
             }
             catch (Exception e) { Log("reading save state threw: " + e.Message); return false; }
         }

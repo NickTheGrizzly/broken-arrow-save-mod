@@ -10,6 +10,7 @@ using Il2CppBrokenArrow.Client.Ecs.Decks.Models;       // IDeckDataModel, DeckSl
 using Il2CppBrokenArrow.DataBase.Models;               // Units
 using Il2CppBrokenArrow.Shared.Ecs;                    // DataBaseService
 using Il2CppBrokenArrow.Shared.Ecs.Services;           // Session
+using Il2CppBrokenArrow.Client.Ecs.Economy;            // RefundDelayService, RefundDelayData
 using UnitCountDict = Il2CppSystem.Collections.Generic.Dictionary<Il2CppBrokenArrow.DataBase.Models.Units, int>;
 
 namespace BASaveGame
@@ -33,8 +34,37 @@ namespace BASaveGame
         {
             var stats = Stats;
             if (stats == null) return null;
-            return "\"deck\": {\"used\": [" + DictJson(stats._playersDict) + "], \"left\": [" + DictJson(stats._unitLeftCount) + "]}";
+            return "\"deck\": {\"used\": [" + DictJson(stats._playersDict) + "], \"left\": [" + DictJson(stats._unitLeftCount) +
+                   "], \"refunds\": [" + RefundsJson() + "]}";
         }
+
+        private static RefundDelayService Refunds
+        {
+            get
+            {
+                try { return Session.GetService(Il2CppInterop.Runtime.Il2CppType.Of<RefundDelayService>())?.Cast<RefundDelayService>(); }
+                catch { return null; }
+            }
+        }
+
+        // Units on their way back to the deck: [owner, unitId, [opts], delay, uid, trackDead, elapsed, name]
+        private static string RefundsJson()
+        {
+            var list = Refunds?._refundDataList;
+            if (list == null) return "";
+            var items = new List<string>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var r = list[i];
+                if (r == null || r.UnitData == null) continue;
+                items.Add("[" + r.OwnerPlayerID + ", " + r.UnitData.Id + ", [" + string.Join(", ", OptionIdsOf(r.UnitData)) + "], " +
+                          F(r.RepurchaseDelay) + ", " + r.UID + ", " + (r.TrackDeadValue ? "true" : "false") + ", " + F(r.CurrentTime) + ", " +
+                          JsonSerializer.Serialize(r.UnitData.Name ?? "") + "]");
+            }
+            return string.Join(", ", items);
+        }
+
+        private static string F(float f) => f.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
 
         private static string DictJson(Il2CppSystem.Collections.Generic.Dictionary<int, UnitCountDict> perPlayer)
         {
@@ -74,7 +104,8 @@ namespace BASaveGame
         // ================= LOAD =================
 
         internal sealed class Entry { public int player, unitId, count; public int[] opts; public string name; }
-        internal sealed class Saved { public List<Entry> used = new List<Entry>(), left = new List<Entry>(); }
+        internal sealed class Refund { public Entry unit; public float delay, elapsed; public int uid; public bool trackDead; }
+        internal sealed class Saved { public List<Entry> used = new List<Entry>(), left = new List<Entry>(); public List<Refund> refunds = new List<Refund>(); }
 
         internal static Saved Parse(JsonElement root)
         {
@@ -82,6 +113,17 @@ namespace BASaveGame
             var s = new Saved();
             Read(d, "used", s.used);
             Read(d, "left", s.left);
+            if (d.TryGetProperty("refunds", out var rf))
+                foreach (var e in rf.EnumerateArray())
+                {
+                    var opts = new List<int>();
+                    foreach (var o in e[2].EnumerateArray()) opts.Add(o.GetInt32());
+                    s.refunds.Add(new Refund
+                    {
+                        unit = new Entry { player = e[0].GetInt32(), unitId = e[1].GetInt32(), opts = opts.ToArray(), name = e[7].GetString() },
+                        delay = e[3].GetSingle(), uid = e[4].GetInt32(), trackDead = e[5].GetBoolean(), elapsed = e[6].GetSingle(),
+                    });
+                }
             return s;
         }
 
@@ -102,6 +144,7 @@ namespace BASaveGame
             var stats = Stats;
             if (stats == null) { log("deck: no UnitStatistic in this battle"); return; }
             log("deck before: used=[" + Summary(stats._playersDict) + "] left=[" + Summary(stats._unitLeftCount) + "]");
+            RestoreRefunds(stats, saved, log);   // first: adding a refund may touch the counts restored below
 
             int changed = 0, same = 0, failed = 0;
             foreach (var e in saved.used)
@@ -137,6 +180,33 @@ namespace BASaveGame
             }
             log("deck: " + changed + " card count(s) restored, " + same + " already right" + (failed > 0 ? ", " + failed + " failed" : ""));
             log("deck after: used=[" + Summary(stats._playersDict) + "] left=[" + Summary(stats._unitLeftCount) + "]");
+        }
+
+        private static void RestoreRefunds(UnitStatistic stats, Saved saved, Action<string> log)
+        {
+            if (saved.refunds.Count == 0) return;
+            var svc = Refunds;
+            if (svc == null) { log("refunds: no RefundDelayService"); return; }
+            var have = new HashSet<int>();
+            var list = svc._refundDataList;
+            if (list != null) for (int i = 0; i < list.Count; i++) if (list[i] != null) have.Add(list[i].UID);
+            int added = 0;
+            foreach (var r in saved.refunds)
+            {
+                try
+                {
+                    if (have.Contains(r.uid)) continue;
+                    Units key = KeyFor(stats._playersDict, r.unit);
+                    if (key == null) { log("  refund: no unit for " + r.unit.name); continue; }
+                    var data = new RefundDelayData(key, r.unit.player, r.delay, r.uid, r.trackDead);
+                    data.CurrentTime = r.elapsed;
+                    svc.AddRefundData(data);
+                    added++;
+                    log("  refund p" + r.unit.player + " " + r.unit.name + ": " + r.elapsed.ToString("0.0") + "/" + r.delay.ToString("0.0") + "s");
+                }
+                catch (Exception ex) { log("  refund " + r.unit.name + " threw: " + ex.Message); }
+            }
+            log("refunds: " + added + "/" + saved.refunds.Count + " pending refund(s) restored");
         }
 
         /// <summary>The Units key to use: an existing key in the player's dict, a deck-slot unit, or a rebuilt one.</summary>

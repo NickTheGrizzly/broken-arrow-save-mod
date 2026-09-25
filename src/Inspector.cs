@@ -761,6 +761,12 @@ namespace BASaveGame
                 if (deck != null) sb.Append(",\n  ").Append(deck);
             }
             catch (Exception ex) { MelonLogger.Warning("[save] deck usage: " + ex.Message); }
+            try
+            {
+                string gm = GameModeState.CaptureJson();
+                if (gm != null) sb.Append(",\n  ").Append(gm);
+            }
+            catch (Exception ex) { MelonLogger.Warning("[save] game mode: " + ex.Message); }
             sb.Append("\n}\n");
             int dupes = MissionState.DuplicateUids();
             if (dupes > 0) MelonLogger.Warning("[save] " + dupes + " live units share a mission uid with another unit (uid collision after a load?)");
