@@ -93,23 +93,7 @@ namespace BASaveGame
         {
             Log("==== full load @ " + DateTime.Now.ToString("s") + " <- " + path + " ====");
             if (Busy) { Log("a load is already in progress"); return; }
-            if (GameController.IsInstanceAlive)
-            {
-                try
-                {
-                    var t = ISceneTransition.Instance;
-                    if (t == null) { Log("abort: ISceneTransition.Instance is null"); return; }
-                    _viaMenu = path;
-                    _viaMenuSince = UnityEngine.Time.realtimeSinceStartup;
-                    _menuSeenAt = -1f;
-                    Log("in a battle: returning to the main menu first (like the game's own launch path)");
-                    t.ChangeScene(null, "Hangar_Scene", false, null, null, null, default(ChangeSceneExtraOptions));
-                }
-                catch (Exception e) { _viaMenu = null; Log("abort: return to main menu threw: " + e.Message); }
-                return;
-            }
             _path = path;
-            LoadGame.SourcePath = path;
 
             Launch? l = ReadLaunch();
             if (l == null) return;
@@ -120,6 +104,33 @@ namespace BASaveGame
             if (src == null) { Log("abort: scenario '" + launch.scenario + "' not found"); return; }
             Log("scenario resolved: " + src.Name + " (hash " + src.Hash + ")");
 
+            // In a battle there are two ways to launch, both the game's own:
+            //  - same scenario as the running battle -> "Restart mission" route (IsMissionRestart +
+            //    ChangeScene(src, "", Restarted: true)); the game keeps the chosen deck across it.
+            //  - different scenario -> back to the main menu first, then launch from there.
+            // (A plain ChangeScene from a battle lost the deck to the old battle's teardown.)
+            bool restart = false;
+            if (GameController.IsInstanceAlive)
+            {
+                if (IsRunning(src)) { restart = true; Log("in a battle of the same scenario: using the game's Restart mission route"); }
+                else
+                {
+                    try
+                    {
+                        var t = ISceneTransition.Instance;
+                        if (t == null) { Log("abort: ISceneTransition.Instance is null"); return; }
+                        _viaMenu = path;
+                        _viaMenuSince = UnityEngine.Time.realtimeSinceStartup;
+                        _menuSeenAt = -1f;
+                        Log("in a battle of another scenario: returning to the main menu first");
+                        t.ChangeScene(null, "Hangar_Scene", false, null, null, null, default(ChangeSceneExtraOptions));
+                    }
+                    catch (Exception e) { _viaMenu = null; Log("abort: return to main menu threw: " + e.Message); }
+                    return;
+                }
+            }
+            LoadGame.SourcePath = path;
+
             if (!SetDeck(launch.deck)) Log("warning: deck '" + launch.deck + "' not set; the game will use its current deck");
 
             try
@@ -129,7 +140,14 @@ namespace BASaveGame
                 Pending = true;
                 _suppressing = true;
                 Suppressed = 0;
-                transition.ChangeScene(src, launch.scene, false, null, null, null, default(ChangeSceneExtraOptions));
+                if (restart)
+                {
+                    PreloadSharedPlayerDeck.IsMissionRestart = true;
+                    var opts = default(ChangeSceneExtraOptions);
+                    opts.Restarted = true;
+                    transition.ChangeScene(src, "", false, null, null, null, opts);
+                }
+                else transition.ChangeScene(src, launch.scene, false, null, null, null, default(ChangeSceneExtraOptions));
                 Log("ChangeScene issued; default units will be suppressed until the world is ready");
             }
             catch (Exception e) { Pending = false; _suppressing = false; Log("abort: ChangeScene threw: " + e.Message); }
@@ -143,7 +161,9 @@ namespace BASaveGame
             Pending = false;
             int units = -1;
             try { units = Inspector.CountUnits(); } catch { }
-            Log("world ready: suppressed " + Suppressed + " default spawn(s) so far; units on map: " + units + ".");
+            string deck = "?";
+            try { deck = PreloadSharedPlayerDeck.ScenarioStartDeck?.FileName ?? "NONE (game will use a fallback deck!)"; } catch { }
+            Log("world ready: suppressed " + Suppressed + " default spawn(s) so far; units on map: " + units + "; deck: " + deck + ".");
             if (!ReadState())
             {
                 Log("no mission state in the save: spawning the saved army only");
@@ -364,6 +384,15 @@ namespace BASaveGame
             _viaMenu = null;
             Log("main menu ready; launching the save");
             Begin(path);
+        }
+
+        /// <summary>Is <paramref name="src"/> the scenario of the battle that's running now?</summary>
+        private static bool IsRunning(ScenarioSource src)
+        {
+            bool Same(ScenarioSource s) => s != null && s.Name == src.Name && (string.IsNullOrEmpty(s.Hash) || s.Hash == src.Hash);
+            try { if (Same(ISceneLoadManager.Instance?.LoadScenario)) return true; } catch { }
+            try { if (Same(ScenariosService.ActiveScenario)) return true; } catch { }
+            return false;
         }
 
         private static bool MainMenuUp()
