@@ -22,6 +22,9 @@ namespace BASaveGame
     {
         internal static string SaveDir;
 
+        /// <summary>The F5/F10 quicksave file.</summary>
+        internal static string QuickSavePath => System.IO.Path.Combine(SaveDir, "quicksave.basave");
+
         public override void OnInitializeMelon()
         {
             // Prevent the MelonLoader console's QuickEdit mode from freezing the game:
@@ -75,6 +78,7 @@ namespace BASaveGame
             LoadFlow.Pump();  // drives the F10 post-load stages (restore progress, settle, reconcile)
             MissionState.Tick();  // hooks the event bus once per battle to track the active map sector
             ScriptDump.Tick();    // records mission-script node activity once per battle (recon)
+            NativeUi.Tick();      // Save/Load in the pause menu and a Saved games card in the main menu
             try
             {
                 if (Input.GetKeyDown(KeyCode.F3)) UiDump.Dump();

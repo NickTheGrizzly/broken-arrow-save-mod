@@ -624,13 +624,16 @@ namespace BASaveGame
         }
 
         // ===== SAVE: write a .basave of the current battle's living units =====
-        internal static void WriteQuickSave()
+        internal static void WriteQuickSave() => WriteSave(SaveMod.QuickSavePath);
+
+        /// <summary>Write the current battle to <paramref name="path"/>. True on success.</summary>
+        internal static bool WriteSave(string path)
         {
-            if (!GameController.IsInstanceAlive) { MelonLogger.Warning("[save] not in a battle"); return; }
+            if (!GameController.IsInstanceAlive) { MelonLogger.Warning("[save] not in a battle"); return false; }
             World world;
             try { world = GameController.Instance.GameContext; }
-            catch (Exception e) { MelonLogger.Error("[save] GameContext: " + e.Message); return; }
-            if (world == null || !EnsureGenericProbe()) { MelonLogger.Error("[save] no world/generics"); return; }
+            catch (Exception e) { MelonLogger.Error("[save] GameContext: " + e.Message); return false; }
+            if (world == null || !EnsureGenericProbe()) { MelonLogger.Error("[save] no world/generics"); return false; }
 
             _pools = new Dictionary<Type, PoolView>();
             Assembly ba = typeof(GameController).Assembly;
@@ -773,12 +776,17 @@ namespace BASaveGame
 
             try
             {
-                string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
-                File.WriteAllText(path, sb.ToString());
+                // Write-then-replace, so a crash mid-write never leaves a half-written save.
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, sb.ToString());
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
                 MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead), " +
                                 scriptNodes + " mission-script nodes -> " + path);
+                return true;
             }
-            catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); }
+            catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); return false; }
         }
 
         /// <summary>

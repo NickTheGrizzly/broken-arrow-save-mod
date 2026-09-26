@@ -381,6 +381,9 @@ namespace BASaveGame
         /// <summary>Called once when the next spawn batch finishes: (saved eid -> new entity, saved eid -> groups).</summary>
         internal static Action<Dictionary<int, Entity>, Dictionary<int, string>> BatchDone;
 
+        /// <summary>The save file to read units from (null = quicksave). Set by LoadFlow for slot loads.</summary>
+        internal static string SourcePath;
+
         /// <summary>Set by LoadFlow during a full load: spawn units under their saved mission uid/groups.</summary>
         internal static bool NativeUids;
 
@@ -545,7 +548,7 @@ namespace BASaveGame
 
         private static List<Rec> ReadSave()
         {
-            string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
+            string path = SourcePath ?? SaveMod.QuickSavePath;
             if (!File.Exists(path)) { Live("no save at " + path); return null; }
 
             var units = new List<Rec>();

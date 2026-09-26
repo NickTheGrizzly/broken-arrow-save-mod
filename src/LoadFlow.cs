@@ -73,11 +73,43 @@ namespace BASaveGame
             catch (Exception e) { Log("patch FAILED SpawnService.SpawnUnit: " + e.Message); }
         }
 
-        /// <summary>F10.</summary>
-        internal static void Begin()
+        private static string _path;
+
+        /// <summary>True from F10 / a Load click until the restore has finished.</summary>
+        internal static bool Busy => Pending || _stage != Stage.Idle || _viaMenu != null;
+
+        // A load started inside a battle goes through the main menu first, exactly like the game
+        // (battles are only ever launched from the hangar). Launching straight from a battle let the
+        // old battle's teardown clear PreloadSharedPlayerDeck.ScenarioStartDeck after we set it, and
+        // the new battle fell back to an "every unit x99" deck.
+        private static string _viaMenu;
+        private static float _viaMenuSince, _menuSeenAt;
+
+        /// <summary>F10: load the quicksave.</summary>
+        internal static void Begin() => Begin(SaveMod.QuickSavePath);
+
+        /// <summary>Relaunch the battle stored in <paramref name="path"/> and restore it.</summary>
+        internal static void Begin(string path)
         {
-            Log("==== full load @ " + DateTime.Now.ToString("s") + " ====");
-            if (Pending) { Log("a load is already in progress"); return; }
+            Log("==== full load @ " + DateTime.Now.ToString("s") + " <- " + path + " ====");
+            if (Busy) { Log("a load is already in progress"); return; }
+            if (GameController.IsInstanceAlive)
+            {
+                try
+                {
+                    var t = ISceneTransition.Instance;
+                    if (t == null) { Log("abort: ISceneTransition.Instance is null"); return; }
+                    _viaMenu = path;
+                    _viaMenuSince = UnityEngine.Time.realtimeSinceStartup;
+                    _menuSeenAt = -1f;
+                    Log("in a battle: returning to the main menu first (like the game's own launch path)");
+                    t.ChangeScene(null, "Hangar_Scene", false, null, null, null, default(ChangeSceneExtraOptions));
+                }
+                catch (Exception e) { _viaMenu = null; Log("abort: return to main menu threw: " + e.Message); }
+                return;
+            }
+            _path = path;
+            LoadGame.SourcePath = path;
 
             Launch? l = ReadLaunch();
             if (l == null) return;
@@ -126,6 +158,7 @@ namespace BASaveGame
         /// <summary>Called every frame from OnUpdate: drives the post-world-ready load stages.</summary>
         internal static void Pump()
         {
+            if (_viaMenu != null) { PumpViaMenu(); return; }
             if (_stage == Stage.Idle || _stage == Stage.Spawning) return;
             if (!GameController.IsInstanceAlive) { Log("battle ended during load; stopping"); Finish(); return; }
             float now = UnityEngine.Time.realtimeSinceStartup;
@@ -182,6 +215,7 @@ namespace BASaveGame
 
         private static void Finish()
         {
+            LoadGame.SourcePath = null;
             _stage = Stage.Idle;
             _suppressing = false;
             Pending = false;
@@ -267,7 +301,7 @@ namespace BASaveGame
 
         private static Launch? ReadLaunch()
         {
-            string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
+            string path = _path;
             if (!File.Exists(path)) { Log("no save at " + path); return null; }
             foreach (string line in File.ReadAllLines(path))
             {
@@ -294,7 +328,7 @@ namespace BASaveGame
             _gameMode = null;
             try
             {
-                string path = Path.Combine(SaveMod.SaveDir, "quicksave.basave");
+                string path = _path;
                 using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
                 var root = doc.RootElement;
                 _mission = MissionState.Parse(root);
@@ -316,6 +350,34 @@ namespace BASaveGame
         {
             var m = Regex.Match(line, "\"" + key + "\":\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
             return m.Success ? m.Groups[1].Value.Replace("\\\"", "\"").Replace("\\\\", "\\") : "";
+        }
+
+        // Wait for the main menu to be up and settled, then start the real load from there.
+        private static void PumpViaMenu()
+        {
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            if (now - _viaMenuSince > 90f) { Log("gave up waiting for the main menu"); _viaMenu = null; return; }
+            if (GameController.IsInstanceAlive || !MainMenuUp()) { _menuSeenAt = -1f; return; }
+            if (_menuSeenAt < 0f) { _menuSeenAt = now; return; }
+            if (now - _menuSeenAt < 1.5f) return;
+            string path = _viaMenu;
+            _viaMenu = null;
+            Log("main menu ready; launching the save");
+            Begin(path);
+        }
+
+        private static bool MainMenuUp()
+        {
+            try
+            {
+                foreach (var o in UnityEngine.Object.FindObjectsOfType(Il2CppInterop.Runtime.Il2CppType.Of<MainMenuScreen>()))
+                {
+                    var s = o.TryCast<MainMenuScreen>();
+                    if (s != null && s.gameObject.activeInHierarchy) return true;
+                }
+            }
+            catch { }
+            return false;
         }
 
         private static void Log(string s) => LoadGame.Live("[flow] " + s);
