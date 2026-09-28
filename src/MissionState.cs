@@ -84,7 +84,7 @@ namespace BASaveGame
                     ui.UpdateTask = Il2CppSystem.Delegate.Combine(ui.UpdateTask, h).Cast<EcsEventBus.UIBus.UpdateTaskDel>();
                     hooked++;
                 }
-                MelonLogger.Msg("[mission] journaling " + hooked + " mission effects (sector, objectives, visibility) for this battle.");
+                ModLog.Dev("[mission] journaling " + hooked + " mission effects (sector, objectives, visibility) for this battle.");
             }
             catch (Exception e)
             {

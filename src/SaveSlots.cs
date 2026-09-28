@@ -15,14 +15,18 @@ namespace BASaveGame
 
         internal sealed class Info
         {
-            public int Index;            // 0 = quicksave, 1..Count = slots
+            public int Index;            // 0 = quicksave, 1..Count = slots, -1 = some other file
             public string Path;
             public bool Exists;
             public string Scenario = "", Map = "";
             public float GameTime;
             public DateTime SavedLocal;
+            public int Version;
 
-            public string Title => Index == 0 ? "Quicksave" : "Slot " + Index;
+            /// <summary>Why this save can't be loaded ("unreadable save", "made by an older version of the mod"...), or null.</summary>
+            public string Problem;
+
+            public string Title => Index == 0 ? "Quicksave" : Index > 0 ? "Slot " + Index : System.IO.Path.GetFileNameWithoutExtension(Path);
 
             /// <summary>Scenario name without the "PvE (1-3p, USA)" prefix.</summary>
             public string Name => ShortName(Scenario, Map);
@@ -37,8 +41,12 @@ namespace BASaveGame
                 }
             }
 
+            /// <summary>"Parnu Invasion · 26:40", or the problem for a save that can't be loaded.</summary>
+            public string Label => Problem == null ? Name + " · " + BattleTime
+                                 : string.IsNullOrEmpty(Name) ? "(" + Problem + ")" : Name + " · (" + Problem + ")";
+
             /// <summary>"Parnu Invasion · 26:40 · Sep 25 01:41" (or "Empty").</summary>
-            public string Summary => !Exists ? "Empty" : Name + " · " + BattleTime + " · " + SavedLocal.ToString("MMM d HH:mm");
+            public string Summary => !Exists ? "Empty" : Label + " · " + SavedLocal.ToString("MMM d HH:mm");
         }
 
         internal static string Dir => Path.Combine(SaveMod.SaveDir, "Slots");
@@ -68,9 +76,13 @@ namespace BASaveGame
             return list;
         }
 
-        internal static Info Read(int index)
+        internal static Info Read(int index) => Inspect(SlotPath(index), index);
+
+        /// <summary>Read a save's header (cached per file timestamp) and check that it can be loaded.</summary>
+        internal static Info Inspect(string path) => Inspect(path, IndexOf(path));
+
+        private static Info Inspect(string path, int index)
         {
-            string path = SlotPath(index);
             var info = new Info { Index = index, Path = path };
             if (!File.Exists(path)) return info;
             DateTime stamp = File.GetLastWriteTimeUtc(path);
@@ -80,27 +92,83 @@ namespace BASaveGame
                 using var doc = JsonDocument.Parse(File.ReadAllText(path));
                 var root = doc.RootElement;
                 info.Exists = true;
+                info.Version = root.TryGetProperty("saveVersion", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 1;
                 if (root.TryGetProperty("map", out var m)) info.Map = m.GetString() ?? "";
                 if (root.TryGetProperty("gameTime", out var gt) && gt.ValueKind == JsonValueKind.Number) info.GameTime = gt.GetSingle();
                 if (root.TryGetProperty("launch", out var l) && l.TryGetProperty("scenario", out var sc)) info.Scenario = sc.GetString() ?? "";
                 info.SavedLocal = root.TryGetProperty("savedUtc", out var su) && DateTime.TryParse(su.GetString(), null,
                                       System.Globalization.DateTimeStyles.RoundtripKind, out var dt)
                                   ? dt.ToLocalTime() : File.GetLastWriteTime(path);
+                // Only the current format is loaded: older saves lack parts of the mission state,
+                // and loading them half-restored would leave the mission in a wrong state.
+                if (info.Version < Inspector.SaveVersion) info.Problem = "made by an older version of the mod";
+                else if (info.Version > Inspector.SaveVersion) info.Problem = "made by a newer version of the mod";
+                else if (string.IsNullOrEmpty(info.Scenario)) info.Problem = "no battle info in the save";
+                else if (IsUnsupported(info.Scenario)) info.Problem = "mission not supported";
             }
             catch
             {
                 info.Exists = true;
-                info.Scenario = "(unreadable save)";
+                info.Problem = "unreadable save";
                 info.SavedLocal = File.GetLastWriteTime(path);
             }
             _cache[path] = (stamp, info);
             return info;
         }
 
+        // Missions whose own scripting (in-mission faction/unit selection, scripted waypoints) the
+        // save doesn't capture: loading them leaves the mission broken, so they're not supported.
+        private static readonly string[] UnsupportedMissions = { "Welcome to Kadaga", "Assault on Daugavpils" };
+
+        internal static bool IsUnsupported(string scenario) =>
+            !string.IsNullOrEmpty(scenario) &&
+            Array.Exists(UnsupportedMissions, m => scenario.IndexOf(m, StringComparison.OrdinalIgnoreCase) >= 0);
+
+        /// <summary>Name of the scenario being played (empty outside a battle or if unknown).</summary>
+        internal static string CurrentScenario()
+        {
+            try
+            {
+                var src = Il2CppBrokenArrow.Client.Ecs.Utils.ISceneLoadManager.Instance?.LoadScenario
+                          ?? Il2CppBrokenArrow.MissionEditor.MissionResolver.ScenariosService.ActiveScenario;
+                return src?.Name ?? "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>True in a battle of a mission the mod doesn't support.</summary>
+        internal static bool CurrentUnsupported => IsUnsupported(CurrentScenario());
+
+        /// <summary>Delete a save file. False (with the reason) if it couldn't be removed.</summary>
+        internal static bool Delete(Info slot, out string error)
+        {
+            error = null;
+            try
+            {
+                if (File.Exists(slot.Path)) File.Delete(slot.Path);
+                _cache.Remove(slot.Path);
+                return true;
+            }
+            catch (Exception e) { error = e.Message; return false; }
+        }
+
+        private static int IndexOf(string path)
+        {
+            try
+            {
+                string full = Path.GetFullPath(path);
+                for (int i = 0; i <= Count; i++)
+                    if (string.Equals(Path.GetFullPath(SlotPath(i)), full, StringComparison.OrdinalIgnoreCase)) return i;
+            }
+            catch { }
+            return -1;
+        }
+
         /// <summary>"PvE (1-3p, USA) Parnu Invasion" -> "Parnu Invasion".</summary>
         private static string ShortName(string scenario, string map)
         {
             string s = string.IsNullOrEmpty(scenario) ? map : scenario;
+            if (string.IsNullOrEmpty(s)) return "";
             int close = s.IndexOf(')');
             if (s.StartsWith("PvE", StringComparison.OrdinalIgnoreCase) && close > 0 && close + 1 < s.Length) s = s.Substring(close + 1).Trim();
             return s;

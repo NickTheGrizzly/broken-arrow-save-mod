@@ -5,18 +5,16 @@ using System.Runtime.InteropServices;
 using MelonLoader;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(BASaveGame.SaveMod), "BA Save Game", "0.1.0", "Nick")]
+[assembly: MelonInfo(typeof(BASaveGame.SaveMod), "BA Save Game", "1.0.0", "Nick")]
 [assembly: MelonGame(null, null)] // any Unity game; guarded at runtime instead
 
 namespace BASaveGame
 {
     /// <summary>
-    /// Entry point for the Broken Arrow save-game mod.
-    ///
-    /// Current stage: scaffold only. It verifies the modding environment
-    /// (MelonLoader up, EasyAntiCheat NOT loaded) and prepares the save
-    /// directory. Actual save/load hooks are added after the recon phase
-    /// pins down the ECS entry points — see the plan file.
+    /// Entry point for the Broken Arrow save-game mod: save an in-progress battle and resume it.
+    /// Players get F5 quicksave / F10 quickload and Save/Load in the pause and main menus.
+    /// DeveloperMode (UserData\MelonPreferences.cfg, [BASaveGame]) adds the diagnostic hotkeys
+    /// and verbose logging (console + Saves\live_load.txt).
     /// </summary>
     public class SaveMod : MelonMod
     {
@@ -24,6 +22,11 @@ namespace BASaveGame
 
         /// <summary>The F5/F10 quicksave file.</summary>
         internal static string QuickSavePath => System.IO.Path.Combine(SaveDir, "quicksave.basave");
+
+        private static MelonPreferences_Entry<bool> _devMode;
+
+        /// <summary>Diagnostic hotkeys and verbose logging. Off for players.</summary>
+        internal static bool DevMode => _devMode != null && _devMode.Value;
 
         public override void OnInitializeMelon()
         {
@@ -34,7 +37,13 @@ namespace BASaveGame
             // accidental click harmless.
             DisableConsoleQuickEdit();
 
-            LoggerInstance.Msg("BA Save Game initializing...");
+            try
+            {
+                var prefs = MelonPreferences.CreateCategory("BASaveGame", "BA Save Game");
+                _devMode = prefs.CreateEntry("DeveloperMode", false, "Developer mode",
+                    "Diagnostic hotkeys (F3, F4, F6-F9, F11, F12) and verbose load logging. Leave off for normal play.");
+            }
+            catch (Exception e) { LoggerInstance.Warning("preferences unavailable: " + e.Message); }
 
             // This build targets an offline-only install with no online capability, so
             // there is no ban surface to protect against. We do NOT block on anti-cheat.
@@ -52,7 +61,6 @@ namespace BASaveGame
                     "AppData", "LocalLow", "SteelBalalaikaStudio", "BrokenArrow");
                 SaveDir = Path.Combine(localLow, "Saves");
                 Directory.CreateDirectory(SaveDir);
-                LoggerInstance.Msg("Save directory: " + SaveDir);
             }
             catch (Exception e)
             {
@@ -61,11 +69,12 @@ namespace BASaveGame
 
             try { HarmonyInstance.PatchAll(System.Reflection.Assembly.GetExecutingAssembly()); }
             catch (Exception e) { LoggerInstance.Warning("PatchAll: " + e.Message); }
-            LaunchProbe.Install(HarmonyInstance);  // full-load recon: logs battle launches to live_launch.txt
-            LoadFlow.Install(HarmonyInstance);     // F10 full load: world-ready hook + default-spawn suppression
+            LoadFlow.Install(HarmonyInstance);     // world-ready hook + default-spawn suppression
 
             _enabled = true;
-            LoggerInstance.Msg("BA Save Game ready. F5 = QUICKSAVE, F6 = load dry-run, F10 = LOAD (relaunch saved battle; works from main menu), F12 = spawn all saved units into this battle. F4 = dump mission script. F3 = dump menu UI. Inspector: F7/F8/F9/F11.");
+            LoggerInstance.Msg("Ready. F5 = quicksave, F10 = quickload, or Save/Load in the pause menu. Saves: " + SaveDir);
+            if (DevMode)
+                LoggerInstance.Msg("DEVELOPER MODE: F3 menu UI dump, F4 mission script dump, F6 load dry-run, F12 spawn saved units, F7/F8/F9/F11 inspector.");
         }
 
         private static bool _enabled;
@@ -77,20 +86,13 @@ namespace BASaveGame
             LoadGame.Pump();  // drives an in-progress F12 spawn batch (one unit per frame)
             LoadFlow.Pump();  // drives the F10 post-load stages (restore progress, settle, reconcile)
             MissionState.Tick();  // hooks the event bus once per battle to track the active map sector
-            ScriptDump.Tick();    // records mission-script node activity once per battle (recon)
+            ScriptDump.Tick();    // records mission-script node activity once per battle (node timers in saves)
             NativeUi.Tick();      // Save/Load in the pause menu and a Saved games card in the main menu
             try
             {
-                if (Input.GetKeyDown(KeyCode.F3)) UiDump.Dump();
-                else if (Input.GetKeyDown(KeyCode.F4)) ScriptDump.Dump();
-                else if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteQuickSave();
-                else if (Input.GetKeyDown(KeyCode.F6)) LoadGame.DryRun();
-                else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
-                else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
-                else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
-                else if (Input.GetKeyDown(KeyCode.F10)) LoadFlow.Begin();
-                else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
-                else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnAllUnits();
+                if (Input.GetKeyDown(KeyCode.F5)) Inspector.WriteSave(QuickSavePath, out _);
+                else if (Input.GetKeyDown(KeyCode.F10)) LoadFlow.BeginQuickLoad();
+                else if (DevMode) DevHotkeys();
             }
             catch (Exception e)
             {
@@ -98,9 +100,26 @@ namespace BASaveGame
                 {
                     _inputWarned = true;
                     LoggerInstance.Warning("Legacy Input unavailable (" + e.Message +
-                        "). Hotkeys disabled; will add an alternate trigger if needed.");
+                        "). Hotkeys disabled; use Save/Load in the pause menu.");
                 }
             }
+        }
+
+        public override void OnGUI()
+        {
+            if (_enabled) Notify.Draw();
+        }
+
+        private static void DevHotkeys()
+        {
+            if (Input.GetKeyDown(KeyCode.F3)) UiDump.Dump();
+            else if (Input.GetKeyDown(KeyCode.F4)) ScriptDump.Dump();
+            else if (Input.GetKeyDown(KeyCode.F6)) LoadGame.DryRun();
+            else if (Input.GetKeyDown(KeyCode.F7)) Inspector.WorldSummary();
+            else if (Input.GetKeyDown(KeyCode.F8)) Inspector.ComponentCensus();
+            else if (Input.GetKeyDown(KeyCode.F9)) Inspector.UnitDump();
+            else if (Input.GetKeyDown(KeyCode.F11)) Inspector.UnitRecords();
+            else if (Input.GetKeyDown(KeyCode.F12)) LoadGame.SpawnAllUnits();
         }
 
         // ---- Console QuickEdit hardening (Win32) ----
@@ -122,7 +141,6 @@ namespace BASaveGame
                 if (!GetConsoleMode(h, out uint mode)) return;
                 uint newMode = (mode & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS;
                 if (newMode != mode) SetConsoleMode(h, newMode);
-                LoggerInstance.Msg("Console QuickEdit disabled (clicking the console won't freeze the game).");
             }
             catch (Exception e) { LoggerInstance.Warning("DisableConsoleQuickEdit: " + e.Message); }
         }

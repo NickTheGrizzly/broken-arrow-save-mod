@@ -56,7 +56,7 @@ namespace BASaveGame
                     new Action<NodeCore>(n => Record(n, false)));
                 nc.add_OnActivateNode(_onAct);
                 nc.add_OnDeactivateNode(_onDeact);
-                MelonLogger.Msg("[script] recording mission-script node activity for this battle (F4 = dump).");
+                ModLog.Dev("[script] recording mission-script node activity for this battle (F4 = dump).");
             }
             catch (Exception e)
             {

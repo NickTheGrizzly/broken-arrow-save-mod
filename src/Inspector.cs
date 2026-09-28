@@ -624,16 +624,48 @@ namespace BASaveGame
         }
 
         // ===== SAVE: write a .basave of the current battle's living units =====
-        internal static void WriteQuickSave() => WriteSave(SaveMod.QuickSavePath);
 
-        /// <summary>Write the current battle to <paramref name="path"/>. True on success.</summary>
-        internal static bool WriteSave(string path)
+        /// <summary>Current save format. v2: skin/opts/ammo; v3: inUnit/inBld; v4: uid/grp + mission; v5: script state + effect journal.</summary>
+        internal const int SaveVersion = 5;
+
+        /// <summary>
+        /// Write the current battle to <paramref name="path"/>. True on success; otherwise
+        /// <paramref name="error"/> says why. Either way the player gets a message.
+        /// </summary>
+        internal static bool WriteSave(string path, out string error)
         {
-            if (!GameController.IsInstanceAlive) { MelonLogger.Warning("[save] not in a battle"); return false; }
-            World world;
-            try { world = GameController.Instance.GameContext; }
-            catch (Exception e) { MelonLogger.Error("[save] GameContext: " + e.Message); return false; }
-            if (world == null || !EnsureGenericProbe()) { MelonLogger.Error("[save] no world/generics"); return false; }
+            error = null;
+            if (!GameController.IsInstanceAlive) return SaveFailed("Saving is only possible during a battle.", out error);
+            if (LoadFlow.Busy) return SaveFailed("Can't save while a saved game is loading.", out error);
+            if (SaveSlots.CurrentUnsupported)
+                return SaveFailed("Saving isn't available in this mission (" + SaveSlots.CurrentScenario() + ").", out error);
+            try
+            {
+                string done = WriteSaveCore(path);
+                if (done == null) return SaveFailed("Save failed: the battle couldn't be read.", out error);
+                string title = SaveSlots.Inspect(path).Title;
+                Notify.Info(title == "Quicksave" ? "Quicksaved" : "Saved to " + title, "[save] " + title + ": " + done);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ModLog.DevWarn("[save] " + ex);
+                return SaveFailed("Save failed: " + (ex.InnerException ?? ex).Message, out error);
+            }
+        }
+
+        private static bool SaveFailed(string message, out string error)
+        {
+            error = message;
+            Notify.Error(message, "[save] " + message);
+            return false;
+        }
+
+        /// <summary>Returns a one-line summary of what was written, or null if the world can't be read. Throws on write errors.</summary>
+        private static string WriteSaveCore(string path)
+        {
+            World world = GameController.Instance.GameContext;
+            if (world == null || !EnsureGenericProbe()) return null;
 
             _pools = new Dictionary<Type, PoolView>();
             Assembly ba = typeof(GameController).Assembly;
@@ -651,7 +683,7 @@ namespace BASaveGame
             // Who is inside what (vehicle passengers, building garrisons). Pools must exist first.
             Dictionary<int, Entity> cargoMap;
             try { cargoMap = CargoMap(world); }
-            catch (Exception ex) { cargoMap = new Dictionary<int, Entity>(); MelonLogger.Warning("[save] cargo map: " + ex.Message); }
+            catch (Exception ex) { cargoMap = new Dictionary<int, Entity>(); ModLog.DevWarn("[save] cargo map: " + ex.Message); }
             int passengers = 0;
             // Mission identity (uid + script groups) per unit, and the owners for the economy snapshot.
             var missionIds = MissionState.UnitIds();
@@ -659,7 +691,7 @@ namespace BASaveGame
 
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.Append("  \"saveVersion\": 5,\n");  // v2: skin/opts/ammo; v3: inUnit/inBld; v4: uid/grp + mission; v5: script state + effect journal
+            sb.Append("  \"saveVersion\": ").Append(SaveVersion).Append(",\n");
             sb.Append("  \"gameVersion\": \"1.2.0\",\n");
             sb.Append("  \"savedUtc\": \"").Append(DateTime.UtcNow.ToString("o")).Append("\",\n");
             sb.Append("  \"map\": \"").Append(Esc(mapName)).Append("\",\n");
@@ -713,7 +745,7 @@ namespace BASaveGame
                                 if (opts[k] != null) optIds.Add(opts[k].Id);
                     }
                 }
-                catch (Exception ex) { MelonLogger.Warning("[save] options for E" + eid + ": " + ex.Message); }
+                catch (Exception ex) { ModLog.DevWarn("[save] options for E" + eid + ": " + ex.Message); }
 
                 var ammo = new List<string>();
                 try
@@ -722,7 +754,7 @@ namespace BASaveGame
                         if (kv.Value != null)
                             ammo.Add("[" + kv.Key + ", " + kv.Value.AmmoQuantity.Value + "]");
                 }
-                catch (Exception ex) { MelonLogger.Warning("[save] ammo for E" + eid + ": " + ex.Message); }
+                catch (Exception ex) { ModLog.DevWarn("[save] ammo for E" + eid + ": " + ex.Message); }
 
                 if (written++ > 0) sb.Append(",\n");
                 sb.Append("    {");
@@ -757,36 +789,33 @@ namespace BASaveGame
                 string script = ScriptState.CaptureJson(out scriptNodes);
                 if (script != null) sb.Append(",\n  ").Append(script);
             }
-            catch (Exception ex) { MelonLogger.Warning("[save] script state: " + ex.Message); }
+            catch (Exception ex) { ModLog.DevWarn("[save] script state: " + ex.Message); }
             try
             {
                 string deck = DeckState.CaptureJson();
                 if (deck != null) sb.Append(",\n  ").Append(deck);
             }
-            catch (Exception ex) { MelonLogger.Warning("[save] deck usage: " + ex.Message); }
+            catch (Exception ex) { ModLog.DevWarn("[save] deck usage: " + ex.Message); }
             try
             {
                 string gm = GameModeState.CaptureJson();
                 if (gm != null) sb.Append(",\n  ").Append(gm);
             }
-            catch (Exception ex) { MelonLogger.Warning("[save] game mode: " + ex.Message); }
+            catch (Exception ex) { ModLog.DevWarn("[save] game mode: " + ex.Message); }
             sb.Append("\n}\n");
             int dupes = MissionState.DuplicateUids();
-            if (dupes > 0) MelonLogger.Warning("[save] " + dupes + " live units share a mission uid with another unit (uid collision after a load?)");
+            if (dupes > 0) ModLog.DevWarn("[save] " + dupes + " live units share a mission uid with another unit (uid collision after a load?)");
 
-            try
-            {
-                // Write-then-replace, so a crash mid-write never leaves a half-written save.
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                string tmp = path + ".tmp";
-                File.WriteAllText(tmp, sb.ToString());
-                if (File.Exists(path)) File.Replace(tmp, path, null);
-                else File.Move(tmp, path);
-                MelonLogger.Msg("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead), " +
-                                scriptNodes + " mission-script nodes -> " + path);
-                return true;
-            }
-            catch (Exception ex) { MelonLogger.Error("[save] write failed: " + ex.Message); return false; }
+            // Write-then-replace, so a crash mid-write never leaves a half-written save.
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            string tmp = path + ".tmp";
+            File.WriteAllText(tmp, sb.ToString());
+            if (File.Exists(path)) File.Replace(tmp, path, null);
+            else File.Move(tmp, path);
+            ModLog.Dev("[save] wrote " + written + " units (" + passengers + " inside a vehicle/building, skipped " + skippedDead + " dead), " +
+                       scriptNodes + " mission-script nodes -> " + path);
+            var saved = SaveSlots.Inspect(path);
+            return (string.IsNullOrEmpty(saved.Name) ? mapName : saved.Name) + " at " + saved.BattleTime + ", " + written + " units";
         }
 
         /// <summary>
@@ -803,9 +832,9 @@ namespace BASaveGame
                           ?? Il2CppBrokenArrow.MissionEditor.MissionResolver.ScenariosService.ActiveScenario;
                 if (src != null) { scenario = src.Name; folder = src.Folder; hash = src.Hash; }
             }
-            catch (Exception ex) { MelonLogger.Warning("[save] scenario: " + ex.Message); }
+            catch (Exception ex) { ModLog.DevWarn("[save] scenario: " + ex.Message); }
             try { deck = Il2CppBrokenArrow.Client.Ecs.Decks_v2.PreloadSharedPlayerDeck.ScenarioStartDeck?.FileName ?? ""; }
-            catch (Exception ex) { MelonLogger.Warning("[save] deck: " + ex.Message); }
+            catch (Exception ex) { ModLog.DevWarn("[save] deck: " + ex.Message); }
 
             return "\"launch\": {\"scenario\": \"" + Esc(scenario) + "\", \"folder\": \"" + Esc(folder) +
                    "\", \"hash\": \"" + Esc(hash) + "\", \"scene\": \"" + Esc(mapName) + "\", \"deck\": \"" + Esc(deck) + "\"}";

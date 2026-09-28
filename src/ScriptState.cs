@@ -55,7 +55,7 @@ namespace BASaveGame
                 if (n == null) continue;
                 string line;
                 try { line = NodeJson(n); }
-                catch (Exception e) { MelonLogger.Warning("[script] node " + SafeId(n) + ": " + e.Message); continue; }
+                catch (Exception e) { ModLog.DevWarn("[script] node " + SafeId(n) + ": " + e.Message); continue; }
                 if (line == null) continue;
                 if (written++ > 0) sb.Append(",\n");
                 sb.Append("    ").Append(line);

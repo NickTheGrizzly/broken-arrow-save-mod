@@ -121,6 +121,9 @@ namespace BASaveGame
         {
             Live("==== spawn all @ " + DateTime.Now.ToString("s") + " ====");
             if (_queue != null) { Live("a spawn batch is already running"); return; }
+            _ok = 0;
+            _total = 0;
+            _failures = new List<string>();
             if (!GameController.IsInstanceAlive) { Live("not in a battle"); return; }
 
             List<Rec> units = ReadSave();
@@ -378,6 +381,13 @@ namespace BASaveGame
             }
         }
 
+        /// <summary>True while a spawn batch is queued or running.</summary>
+        internal static bool BatchRunning => _queue != null;
+
+        /// <summary>Results of the last spawn batch: units spawned / units in the save.</summary>
+        internal static int SpawnedOk => _ok;
+        internal static int SpawnTotal => _total;
+
         /// <summary>Called once when the next spawn batch finishes: (saved eid -> new entity, saved eid -> groups).</summary>
         internal static Action<Dictionary<int, Entity>, Dictionary<int, string>> BatchDone;
 
@@ -544,7 +554,7 @@ namespace BASaveGame
             catch (Exception e) { Live("service " + label + " threw: " + e.Message); return null; }
         }
 
-        // ---- save parsing (one unit per line, as written by Inspector.WriteQuickSave) ----
+        // ---- save parsing (one unit per line, as written by Inspector.WriteSave) ----
 
         private static List<Rec> ReadSave()
         {
@@ -622,8 +632,10 @@ namespace BASaveGame
             return outv;
         }
 
+        /// <summary>Step-by-step load log: console + Saves\live_load.txt, developer mode only.</summary>
         internal static void Live(string s)
         {
+            if (!SaveMod.DevMode) return;
             MelonLogger.Msg("[load] " + s);
             try
             {

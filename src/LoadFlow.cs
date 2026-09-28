@@ -25,7 +25,7 @@ namespace BASaveGame
     /// way the menu does, keep the scenario's default units from spawning, and once the world is
     /// ready spawn the saved army with the normal F12 batch.
     ///
-    /// Launch recipe (recorded from real launches — see LaunchProbe / live_launch.txt):
+    /// Launch recipe (recorded from real launches with a diagnostic probe, since removed):
     ///   PreloadSharedPlayerDeck.ScenarioStartDeck = player's deck
     ///   ISceneTransition.Instance.ChangeScene(src, sceneName, false, null, null, null, default)
     ///   -> SceneLoadManager.LoadSceneAsync -> GameController.OnScenarioControllerLoaded (world ready)
@@ -85,23 +85,39 @@ namespace BASaveGame
         private static string _viaMenu;
         private static float _viaMenuSince, _menuSeenAt;
 
-        /// <summary>F10: load the quicksave.</summary>
-        internal static void Begin() => Begin(SaveMod.QuickSavePath);
+        private static SaveSlots.Info _info;     // the save being loaded (for messages)
+        private static float _pendingSince;
+        private const float WorldReadyTimeout = 300f;
 
-        /// <summary>Relaunch the battle stored in <paramref name="path"/> and restore it.</summary>
-        internal static void Begin(string path)
+        /// <summary>F10: load the quicksave.</summary>
+        internal static void BeginQuickLoad()
+        {
+            if (!File.Exists(SaveMod.QuickSavePath)) { Fail("No quicksave yet. Press F5 during a battle to make one."); return; }
+            Begin(SaveMod.QuickSavePath);
+        }
+
+        /// <summary>
+        /// Relaunch the battle stored in <paramref name="path"/> and restore it. Returns null when
+        /// the load has started, otherwise the reason it couldn't (already shown to the player).
+        /// </summary>
+        internal static string Begin(string path)
         {
             Log("==== full load @ " + DateTime.Now.ToString("s") + " <- " + path + " ====");
-            if (Busy) { Log("a load is already in progress"); return; }
+            if (Busy) return Fail("A saved game is already loading.");
+
+            var info = SaveSlots.Inspect(path);
+            if (!info.Exists) return Fail("There is no save in " + info.Title + ".");
+            if (info.Problem != null) return Fail("Can't load " + info.Title + ": " + info.Problem + ".");
+            _info = info;
             _path = path;
 
             Launch? l = ReadLaunch();
-            if (l == null) return;
+            if (l == null) return Fail("Can't load " + info.Title + ": no battle info in the save.");
             Launch launch = l.Value;
             Log("save launch: scenario='" + launch.scenario + "' scene='" + launch.scene + "' deck='" + launch.deck + "'");
 
             ScenarioSource src = FindScenario(launch);
-            if (src == null) { Log("abort: scenario '" + launch.scenario + "' not found"); return; }
+            if (src == null) return Fail("Can't load " + info.Title + ": the mission \"" + info.Name + "\" isn't installed.");
             Log("scenario resolved: " + src.Name + " (hash " + src.Hash + ")");
 
             // In a battle there are two ways to launch, both the game's own:
@@ -118,26 +134,29 @@ namespace BASaveGame
                     try
                     {
                         var t = ISceneTransition.Instance;
-                        if (t == null) { Log("abort: ISceneTransition.Instance is null"); return; }
+                        if (t == null) return Fail("Couldn't start the load: the game's scene loader isn't available.");
                         _viaMenu = path;
                         _viaMenuSince = UnityEngine.Time.realtimeSinceStartup;
                         _menuSeenAt = -1f;
                         Log("in a battle of another scenario: returning to the main menu first");
                         t.ChangeScene(null, "Hangar_Scene", false, null, null, null, default(ChangeSceneExtraOptions));
                     }
-                    catch (Exception e) { _viaMenu = null; Log("abort: return to main menu threw: " + e.Message); }
-                    return;
+                    catch (Exception e) { _viaMenu = null; return Fail("Couldn't return to the main menu to load: " + e.Message); }
+                    return null;
                 }
             }
             LoadGame.SourcePath = path;
 
-            if (!SetDeck(launch.deck)) Log("warning: deck '" + launch.deck + "' not set; the game will use its current deck");
+            if (!SetDeck(launch.deck))
+                Notify.Error("The deck used in this save (" + launch.deck + ") wasn't found; loading with your current deck.",
+                             "[load] deck '" + launch.deck + "' not found; the game will use its current deck");
 
             try
             {
                 var transition = ISceneTransition.Instance;
-                if (transition == null) { Log("abort: ISceneTransition.Instance is null"); return; }
+                if (transition == null) return Fail("Couldn't start the load: the game's scene loader isn't available.");
                 Pending = true;
+                _pendingSince = UnityEngine.Time.realtimeSinceStartup;
                 _suppressing = true;
                 Suppressed = 0;
                 if (restart)
@@ -150,7 +169,22 @@ namespace BASaveGame
                 else transition.ChangeScene(src, launch.scene, false, null, null, null, default(ChangeSceneExtraOptions));
                 Log("ChangeScene issued; default units will be suppressed until the world is ready");
             }
-            catch (Exception e) { Pending = false; _suppressing = false; Log("abort: ChangeScene threw: " + e.Message); }
+            catch (Exception e)
+            {
+                Pending = false;
+                _suppressing = false;
+                LoadGame.SourcePath = null;
+                return Fail("Couldn't start the saved battle: " + e.Message);
+            }
+            return null;
+        }
+
+        /// <summary>A load that stops: one log line + an on-screen message. Returns the message.</summary>
+        private static string Fail(string message)
+        {
+            Log("abort: " + message);
+            Notify.Error(message, "[load] " + message);
+            return message;
         }
 
         // ---- hooks ----
@@ -179,9 +213,32 @@ namespace BASaveGame
         internal static void Pump()
         {
             if (_viaMenu != null) { PumpViaMenu(); return; }
-            if (_stage == Stage.Idle || _stage == Stage.Spawning) return;
-            if (!GameController.IsInstanceAlive) { Log("battle ended during load; stopping"); Finish(); return; }
             float now = UnityEngine.Time.realtimeSinceStartup;
+            if (Pending && now - _pendingSince > WorldReadyTimeout)
+            {
+                Fail("The saved battle didn't finish loading. Try loading it again.");
+                Finish();
+                return;
+            }
+            if (_stage == Stage.Idle) return;
+            if (!GameController.IsInstanceAlive)
+            {
+                LoadGame.BatchDone = null;
+                Fail("Loading stopped: the battle was closed before it finished.");
+                Finish();
+                return;
+            }
+            if (_stage == Stage.Spawning)
+            {
+                // The spawn batch normally ends in OnArmySpawned. If it never started (no units in
+                // the save, or the unit database wasn't available) finish the restore without it.
+                if (!LoadGame.BatchRunning && LoadGame.BatchDone != null)
+                {
+                    LoadGame.BatchDone = null;
+                    OnArmySpawned(new Dictionary<int, Il2CppDefaultEcs.Entity>(), new Dictionary<int, string>());
+                }
+                return;
+            }
 
             if (_stage == Stage.Start && now - _stageAt >= StartDelay)
             {
@@ -228,10 +285,28 @@ namespace BASaveGame
                 if (_gameMode != null) GameModeState.Restore(_gameMode, _mission?.zones, Log);
                 if (resume != null && resume.Count > 0) ScriptState.Resume(resume, _script.gameTime, Log);
             }
-            catch (Exception e) { Log("restore threw: " + e); }
+            catch (Exception e)
+            {
+                Log("restore threw: " + e);
+                Finish();
+                Notify.Error("Loaded " + Describe() + ", but part of the mission state couldn't be restored.",
+                             "[load] " + Describe() + ": restore error: " + (e.InnerException ?? e).Message);
+                return;
+            }
             Finish();
             Log("==== load complete (spawns suppressed during load: " + Suppressed + ") ====");
+            int ok = LoadGame.SpawnedOk, total = LoadGame.SpawnTotal;
+            string units = ok + "/" + total + " units";
+            if (ok < total)
+                Notify.Error("Loaded " + Describe() + ": " + (total - ok) + " of " + total + " units couldn't be restored.",
+                             "[load] Loaded " + Describe() + ": " + units + " restored");
+            else
+                Notify.Info("Loaded " + Describe(), "[load] Loaded " + Describe() + ": " + units + " restored");
         }
+
+        /// <summary>"Slot 2 (Parnu Invasion, 26:40)".</summary>
+        private static string Describe() =>
+            _info == null ? "the save" : _info.Title + " (" + _info.Name + ", " + _info.BattleTime + ")";
 
         private static void Finish()
         {
@@ -376,7 +451,7 @@ namespace BASaveGame
         private static void PumpViaMenu()
         {
             float now = UnityEngine.Time.realtimeSinceStartup;
-            if (now - _viaMenuSince > 90f) { Log("gave up waiting for the main menu"); _viaMenu = null; return; }
+            if (now - _viaMenuSince > 90f) { _viaMenu = null; Fail("Loading stopped: the main menu didn't come up."); return; }
             if (GameController.IsInstanceAlive || !MainMenuUp()) { _menuSeenAt = -1f; return; }
             if (_menuSeenAt < 0f) { _menuSeenAt = now; return; }
             if (now - _menuSeenAt < 1.5f) return;
