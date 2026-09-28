@@ -217,6 +217,39 @@ namespace BASaveGame
                    ", \"journal\": [" + string.Join(", ", journal) + "]}";
         }
 
+        // ---------------- uid guard (loaded battles) ----------------
+        // Every mission entity, units the player orders included, has a mission uid. A load
+        // restarts the mission, so the game's own uid sequence starts again from the mission's
+        // first free uid, while the restored army keeps its saved uids (the script refers to
+        // them). The next ordered unit then gets a uid a restored unit already has, and its spawn
+        // throws inside SpawnService (EditorObjectDataComponent added twice): credits spent, no unit.
+        // So in a loaded battle, every new spawn without a uid or with a taken one is given a free
+        // uid first; the game honours a preset SpawnData.UID (that's how the army keeps its own).
+        private static int _lastGivenUid;
+
+        internal static void ResetUidGuard() => _lastGivenUid = 0;
+
+        internal static void GiveFreeUid(Il2CppBrokenArrow.Client.Ecs.Spawn.SpawnData data, Action<string> log)
+        {
+            try
+            {
+                if (data == null) return;
+                var registry = MissionEntitiesStorageSystem._data;
+                if (registry == null) return;
+                int uid = data.UID;
+                if (uid != 0 && !registry.ContainsKey(uid)) return;   // the game's own uid is free: keep it
+                int max = _lastGivenUid;
+                var en = registry.GetEnumerator();
+                while (en.MoveNext()) if (en.Current.Key > max) max = en.Current.Key;
+                _lastGivenUid = max + 1;
+                data.UID = _lastGivenUid;
+                string name = "?";
+                try { name = data.UnitToSpawn?.Name ?? "?"; } catch { }
+                log("uid guard: " + name + " uid " + (uid == 0 ? "none" : uid + " (taken)") + " -> " + _lastGivenUid);
+            }
+            catch (Exception e) { log("uid guard threw: " + e.Message); }
+        }
+
         // ================= LOAD =================
 
         internal sealed class Saved

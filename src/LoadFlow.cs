@@ -269,6 +269,10 @@ namespace BASaveGame
                 var unbound = LoadGame.UnboundSpawned(spawned);
                 if (unbound.Count > 0) MissionState.AssignGroups(unbound, groups, Log);  // fallback where the uid didn't take
                 MissionState.RemoveAllExcept(spawned.Values, Log);        // anything that slipped past suppression
+                // From here on, new spawns in this battle get uids that can't collide with the
+                // restored army's saved ones (see MissionState.GiveFreeUid).
+                MissionState.ResetUidGuard();
+                _loadedBattle = GameController.Instance.Pointer;
 
                 // World effects first: anything the script does in reaction is overwritten by the
                 // node restore that follows.
@@ -317,14 +321,26 @@ namespace BASaveGame
             LoadGame.NativeUids = false;
         }
 
-        // Skip every spawn that isn't ours while a load is in progress (returns an already-completed
-        // task so callers awaiting it just continue).
-        private static bool SuppressSpawnPrefix(ref UniTask __result)
+        // The battle a load restored (its GameController), for the uid guard.
+        private static IntPtr _loadedBattle;
+
+        private static bool InLoadedBattle =>
+            _loadedBattle != IntPtr.Zero && GameController.IsInstanceAlive && GameController.Instance.Pointer == _loadedBattle;
+
+        // While a load is in progress: skip every spawn that isn't ours (returns an already-completed
+        // task so callers awaiting it just continue). After a load, in that battle: make sure the new
+        // unit's mission uid is free.
+        private static bool SuppressSpawnPrefix(SpawnData __0, ref UniTask __result)
         {
-            if (!_suppressing || LoadGame.OwnSpawnCall) return true;
-            Suppressed++;
-            __result = UniTask.CompletedTask;
-            return false;
+            if (_suppressing)
+            {
+                if (LoadGame.OwnSpawnCall) return true;
+                Suppressed++;
+                __result = UniTask.CompletedTask;
+                return false;
+            }
+            if (InLoadedBattle) MissionState.GiveFreeUid(__0, Log);
+            return true;
         }
 
         // ---- scenario + deck ----
