@@ -12,3 +12,6 @@ recon/*.dat
 # Do NOT commit game binaries or third-party tools
 tools/
 *.zip
+
+# Release builds go to GitHub Releases, not the repo
+dist/

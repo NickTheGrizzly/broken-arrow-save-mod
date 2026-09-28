@@ -17,7 +17,7 @@ When you load, the mod relaunches the same mission with the same deck, holds bac
 ## Install
 
 1. Install **MelonLoader 0.7.3** into the game folder (the folder that contains `BrokenArrow.exe`). Start the game once so MelonLoader can finish setting up, then quit.
-2. Copy `BASaveGame.dll` into the game's `Mods\` folder.
+2. Download `BASaveGame-vX.Y.Z.zip` from the [Releases](https://github.com/NickTheGrizzly/broken-arrow-save-mod/releases) page and extract it into the game folder. That puts `BASaveGame.dll` into `Mods\`.
 3. Start the game by running **`BrokenArrow.exe` directly** (not the EasyAntiCheat launcher).
 
 The MelonLoader console should show a line from BA Save Game starting with `Ready. F5 = quicksave, F10 = quickload`.
@@ -95,3 +95,7 @@ Background notes: [`recon/FEASIBILITY.md`](recon/FEASIBILITY.md) (architecture),
 ## Credits
 
 Load-path techniques studied from BovineOverlord's `broken-arrow-local-skirmish` and `broken-arrow-balance-mod` (MelonLoader, offline).
+
+## License
+
+[MIT](LICENSE). Broken Arrow belongs to Steel Balalaika; this is an unofficial fan mod and is not affiliated with or endorsed by the developers.
