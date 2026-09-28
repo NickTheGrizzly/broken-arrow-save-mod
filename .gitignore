@@ -15,3 +15,8 @@ tools/
 
 # Release builds go to GitHub Releases, not the repo
 dist/
+
+# Private working notes: backed up in a separate private repo (.notes.git), never committed here
+CLAUDE.md
+HANDOFF.md
+.notes.git/
