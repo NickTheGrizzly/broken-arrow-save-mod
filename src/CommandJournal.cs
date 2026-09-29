@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using Il2CppBrokenArrow.Client.Ecs.Controllers;        // GameController
 using Il2CppBrokenArrow.Shared.Ecs.MissionEditor;      // EcsEventBus, MoveSimpleData, MoveComplexData, CaptureZoneData, AttackUnitData
 using Il2CppBrokenArrow.Shared.Ecs.Enums;              // WayPathEnum
@@ -346,6 +347,71 @@ namespace BASaveGame
             var bc = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.BaseCommand>();
             if (bc == null || bc.WasCompleted || bc.WasCanceled) return;
 
+            // Jets' precision strikes: the strike points still to hit (from the current one on).
+            var precision = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.PrecisionStrikeCommand>();
+            if (precision != null)
+            {
+                var all = precision._allStrikePositions;
+                if (all == null || all.Length == 0) return;
+                var currentPoint = precision._currentStrikePoint;
+                int from = 0;
+                if (currentPoint != null)
+                    for (int i = 0; i < all.Length; i++) if (all[i] != null && all[i].Pointer == currentPoint.Pointer) { from = i; break; }
+                var pts = new List<string>();
+                for (int i = from; i < all.Length; i++)
+                {
+                    if (all[i] == null) continue;
+                    var q = all[i].Point;
+                    pts.Add(F(q.x) + ", " + F(q.y) + ", " + F(q.z));
+                }
+                if (pts.Count > 0) moves.Add("[\"precision\", " + string.Join(", ", pts) + "]");
+                return;
+            }
+
+            // Artillery fire missions: point or line (creeping is re-issued as a line), ammo, duration.
+            var fire = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.FireMissionCommand>();
+            if (fire != null)
+            {
+                // SecondTargetPosition / MissionSettings are Nullable<struct> fields, which Il2CppInterop
+                // reads with a shifted layout (a point came back as (y, z, 0) and sent the guns to the
+                // map corner). Read them from the object's memory instead: IL2CPP Nullable<T> is
+                // { bool hasValue; T value } with the value at +4.
+                int mode = 1, ammo = 1, duration = 1;   // Point / Explosion / Short
+                var a = fire.FirstTargetPosition;
+                var b = a;
+                try
+                {
+                    IntPtr info = FieldAddress(fire, typeof(Il2CppBrokenArrow.Client.Ecs.Commands.FireMissionCommand), "MissionSettings");
+                    if (info != IntPtr.Zero && Marshal.ReadByte(info) != 0)
+                    {
+                        int am = Marshal.ReadInt32(info + 4), du = Marshal.ReadInt32(info + 8), mo = Marshal.ReadInt32(info + 12);
+                        if (am >= 0 && am <= 3) ammo = am;
+                        if (du >= 0 && du <= 3) duration = du;
+                        if (mo >= 1 && mo <= 3) mode = mo;
+                    }
+                    IntPtr second = FieldAddress(fire, typeof(Il2CppBrokenArrow.Client.Ecs.Commands.FireMissionCommand), "SecondTargetPosition");
+                    if (mode >= 2 && second != IntPtr.Zero && Marshal.ReadByte(second) != 0)
+                    {
+                        var s2 = new UnityEngine.Vector3(ReadFloat(second + 4), ReadFloat(second + 8), ReadFloat(second + 12));
+                        // A barrage line is a few hundred metres at most: anything else is a bad read.
+                        if ((s2 - a).magnitude < 3000f) b = s2; else mode = 1;
+                    }
+                    else mode = 1;
+                }
+                catch (Exception e) { mode = 1; ModLog.DevWarn("[orders] fire mission settings: " + e.Message); }
+                ModLog.Dev("[orders] fire mission: mode " + mode + ", ammo " + ammo + ", duration " + duration + ", at " + a + (mode >= 2 ? " to " + b : ""));
+                moves.Add("[\"fire\", " + F(a.x) + ", " + F(a.y) + ", " + F(a.z) + ", " + F(b.x) + ", " + F(b.y) + ", " + F(b.z) +
+                          ", " + mode + ", " + ammo + ", " + duration + "]");
+                return;
+            }
+
+            // "Back to base": drive to the spawner, then despawn with a refund.
+            if (command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.BackToBaseCommand>() != null)
+            {
+                moves.Add("[\"base\", 0, 0, 0]");
+                return;
+            }
+
             var strike = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.AirstrikeCommand>();
             if (strike != null)
             {
@@ -372,6 +438,19 @@ namespace BASaveGame
         }
 
         private static string F(float f) => f.ToString("R", CultureInfo.InvariantCulture);
+
+        private static float ReadFloat(IntPtr p) => BitConverter.Int32BitsToSingle(Marshal.ReadInt32(p));
+
+        /// <summary>Address of an IL2CPP instance field inside <paramref name="obj"/> (via the interop class's field-info pointer).</summary>
+        private static IntPtr FieldAddress(Il2CppInterop.Runtime.InteropTypes.Il2CppObjectBase obj, Type interopType, string field)
+        {
+            var fi = interopType.GetField("NativeFieldInfoPtr_" + field, BindingFlags.NonPublic | BindingFlags.Static);
+            if (fi == null) return IntPtr.Zero;
+            var info = (IntPtr)fi.GetValue(null);
+            if (info == IntPtr.Zero) return IntPtr.Zero;
+            uint offset = Il2CppInterop.Runtime.IL2CPP.il2cpp_field_get_offset(info);
+            return obj.Pointer + (int)offset;
+        }
 
         /// <summary>The "playerOrders" member: [{"uid": N, "m": [[kind, x, y, z], ...]}, ...].</summary>
         internal static string PlayerOrdersJson(List<KeyValuePair<int, string>> perUnit) =>
@@ -415,6 +494,72 @@ namespace BASaveGame
                                 u.Blocking = false;
                                 u.UnloadedUnitsBuffer = new IntList();
                                 cmd.UnloadCommand?.Invoke(u);
+                                moves++;
+                                first = false;
+                                continue;
+                            }
+                            if (kind == "base")
+                            {
+                                var r = new Il2CppBrokenArrow.ScriptEngine.Data.NodeRefundData();
+                                r.UnitUID = uid;
+                                r.BackToBase = true;
+                                r.Queue = !first;
+                                r.Blocking = false;
+                                cmd.RefundCommand?.Invoke(r);
+                                moves++;
+                                first = false;
+                                continue;
+                            }
+                            if (kind == "precision")
+                            {
+                                var p = new Il2CppBrokenArrow.ScriptEngine.Data.NodePrecisionStrikeCommandData();
+                                p.UnitUID = uid;
+                                var points = new Il2CppSystem.Collections.Generic.List<Il2CppBrokenArrow.ScriptEngine.Data.NodePrecisionStrikeData>();
+                                for (int i = 1; i + 2 < mv.GetArrayLength(); i += 3)
+                                {
+                                    var pt = new Il2CppBrokenArrow.ScriptEngine.Data.NodePrecisionStrikeData();
+                                    pt.TargetPosition = new UnityEngine.Vector3(mv[i].GetSingle(), mv[i + 1].GetSingle(), mv[i + 2].GetSingle());
+                                    points.Add(pt);
+                                }
+                                p.CommandData = points;
+                                p.RandomSpreadPositions = new Il2CppSystem.Collections.Generic.HashSet<UnityEngine.Vector3>();
+                                p.Queue = !first;
+                                p.Blocking = false;
+                                cmd.PrecisionStrikeCommand?.Invoke(p);
+                                moves++;
+                                first = false;
+                                continue;
+                            }
+                            if (kind == "fire")
+                            {
+                                var start = at;
+                                var end = new UnityEngine.Vector3(mv[4].GetSingle(), mv[5].GetSingle(), mv[6].GetSingle());
+                                int mode = mv[7].GetInt32();
+                                var ammoType = (AmmoTypeEnum)Math.Max(0, mv[8].GetInt32() - 1);   // unit enums start with None
+                                var duration = (DurationEnum)Math.Max(0, mv[9].GetInt32() - 1);
+                                if (mode >= 2)
+                                {
+                                    var l = new FireMissionLineData();
+                                    l.UnitUID = uid;
+                                    l.TargetStartVector = start;
+                                    l.TargetEndVector = end;
+                                    l.AmmoType = ammoType;
+                                    l.Duration = duration;
+                                    l.Queue = !first;
+                                    l.Blocking = false;
+                                    cmd.FireMissionLineTarget?.Invoke(l, out _, out _);   // outs: where the game aimed
+                                }
+                                else
+                                {
+                                    var pd = new FireMissionPointData();
+                                    pd.UnitUID = uid;
+                                    pd.TargetVector = start;
+                                    pd.AmmoType = ammoType;
+                                    pd.Duration = duration;
+                                    pd.Queue = !first;
+                                    pd.Blocking = false;
+                                    cmd.FireMissionPointTarget?.Invoke(pd, out _);
+                                }
                                 moves++;
                                 first = false;
                                 continue;

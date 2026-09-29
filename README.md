@@ -8,6 +8,7 @@ A [MelonLoader](https://github.com/LavaGang/MelonLoader) mod that lets you **sav
 
 - Every living unit: type, position, facing, health, ammunition, options/loadout, skin, and passengers or garrisons inside vehicles and buildings.
 - Mission progress: the mission script's state (objectives, triggers, timers), captured zones and the active sector, objective and marker visibility.
+- Unit orders in progress: the mission's own orders (patrols, attack waves, waypoint paths) and your pending orders: moves (including fast and attack-moves, and queued waypoints), unloads, jet precision strikes, artillery fire missions and back-to-base.
 - Economy: money and income for each player.
 - Your deck: which cards you've already used and any pending refunds.
 - The in-battle clock.
@@ -52,7 +53,7 @@ They're plain JSON, so you can back them up or copy them between machines.
 - **No campaign saves.** Campaign progress between missions isn't handled.
 - **Not supported: Welcome to Kadaga and Assault on Daugavpils.** Their in-mission unit selection and scripted waypoints aren't captured by a save, so saving is disabled there (the pause menu's Save game is dimmed) and older saves of them can't be loaded.
 - **Current save format only.** Saves made by development builds (format version below 5) show up as "made by an older version of the mod" and can't be loaded.
-- Units that were in the middle of an action (moving, firing, loading) restart from their saved position and state rather than resuming the exact action.
+- Some orders aren't restored: attacks on a specific unit, loading into transports and resupply. Units with those orders stop and wait for new ones. Creeping barrages resume as a line barrage, and shells or bombs already in the air at the moment of saving are lost.
 - Loading while you're in a *different* mission goes back to the main menu first, then starts the saved one. This is intentional: it's the only way the game keeps your deck.
 
 ## Troubleshooting
