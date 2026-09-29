@@ -93,6 +93,12 @@ The game is Unity 2022.3 (IL2CPP) with a DefaultEcs world (`GameController.Insta
 
 Background notes: [`recon/FEASIBILITY.md`](recon/FEASIBILITY.md) (architecture), [`recon/LOAD_PATH.md`](recon/LOAD_PATH.md) (how battles are launched), [`CLAUDE.md`](CLAUDE.md) (IL2CPP interop rules learned the hard way).
 
+## How it was built
+
+![BA Save Game development record](docs/dev-stats.svg)
+
+Built with Claude as an AI coding partner; every build was tested in game by me, and every fix came from a bug found in play. The numbers above come straight from git, the game's session logs and the mod's load log.
+
 ## Credits
 
 Load-path techniques studied from BovineOverlord's `broken-arrow-local-skirmish` and `broken-arrow-balance-mod` (MelonLoader, offline).

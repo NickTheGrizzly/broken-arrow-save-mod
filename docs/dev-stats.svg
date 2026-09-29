@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="476" viewBox="0 0 820 476" role="img" aria-labelledby="t d">
+  <title id="t">BA Save Game: development record</title>
+  <desc id="d">Development record, Sep 20 to Sep 29 2026. Field testing measured from the game's own session logs: 96 game test sessions, about 27 hours in game, 56 full save/load cycles, 2,642 unit respawns verified. Command and review: 125 messages directing the work, 116 files reviewed, 22 commits and 2 releases, about 6,200 lines of C# in 14 files.</desc>
+  <defs>
+    <!-- explosion glow, top right -->
+    <radialGradient id="blast" cx="0.86" cy="0.02" r="0.78">
+      <stop offset="0" stop-color="#ffd9a0" stop-opacity="0.95"/>
+      <stop offset="0.16" stop-color="#ff9a3c" stop-opacity="0.85"/>
+      <stop offset="0.42" stop-color="#d9531e" stop-opacity="0.45"/>
+      <stop offset="0.75" stop-color="#3a1a10" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#11141a" stop-opacity="0"/>
+    </radialGradient>
+    <!-- smoke haze, bottom left -->
+    <radialGradient id="haze" cx="0.05" cy="1" r="0.7">
+      <stop offset="0" stop-color="#2b3550" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#11141a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffcf7a"/>
+      <stop offset="1" stop-color="#ff7a2a"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff8a2e" stop-opacity="0.9"/>
+      <stop offset="0.6" stop-color="#ff8a2e" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#ff8a2e" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c2230" stop-opacity="0.92"/>
+      <stop offset="1" stop-color="#141821" stop-opacity="0.92"/>
+    </linearGradient>
+  </defs>
+  <style>
+    /* Segoe UI throughout; emphasis from size and colour, weights 400/600 only. */
+    .brand { font: 600 34px "Segoe UI", sans-serif; letter-spacing: 1px; }
+    .tag { font: 400 11px "Segoe UI", sans-serif; letter-spacing: 3px; fill: #ff9a3c; }
+    .sub { font: 400 13px "Segoe UI", sans-serif; fill: #e9dcc6; }
+    .meta { font: 600 11px "Segoe UI", sans-serif; letter-spacing: 2px; fill: #1c2745; }
+    .sec { font: 600 11px "Segoe UI", sans-serif; letter-spacing: 1.6px; fill: #ff9a3c; }
+    .secn { font: 400 11px "Segoe UI", sans-serif; letter-spacing: 0.3px; fill: #a8998a; }
+    .n { font: 400 31px "Segoe UI", sans-serif; fill: #ffb347; }
+    .l { font: 400 12px "Segoe UI", sans-serif; letter-spacing: 0.2px; fill: #e9dcc6; }
+    .foot { font: 400 11.5px "Segoe UI", sans-serif; fill: #b3a391; }
+    .footb { font: 600 11.5px "Segoe UI", sans-serif; fill: #ffb347; }
+  </style>
+
+  <!-- battlefield backdrop -->
+  <rect width="820" height="476" fill="#11141a"/>
+  <rect width="820" height="476" fill="url(#blast)"/>
+  <rect width="820" height="476" fill="url(#haze)"/>
+  <!-- drifting debris -->
+  <g fill="#1a1512" opacity="0.55">
+    <rect x="598" y="22" width="5" height="3" transform="rotate(28 600 23)"/>
+    <rect x="652" y="58" width="4" height="4" transform="rotate(12 654 60)"/>
+    <rect x="714" y="78" width="6" height="3" transform="rotate(-20 717 79)"/>
+    <rect x="760" y="86" width="4" height="3" transform="rotate(40 762 87)"/>
+    <rect x="690" y="104" width="3" height="3"/>
+    <rect x="560" y="70" width="4" height="2" transform="rotate(-35 562 71)"/>
+    <rect x="788" y="72" width="5" height="4" transform="rotate(15 790 74)"/>
+    <rect x="628" y="96" width="3" height="2"/>
+  </g>
+  <g fill="#ffd9a0" opacity="0.6">
+    <circle cx="742" cy="64" r="1.4"/><circle cx="676" cy="40" r="1.1"/><circle cx="792" cy="112" r="1.2"/>
+    <circle cx="612" cy="100" r="0.9"/><circle cx="708" cy="126" r="1"/>
+  </g>
+  <!-- frame -->
+  <rect x="0.5" y="0.5" width="819" height="475" fill="none" stroke="#ff8a2e" stroke-opacity="0.35"/>
+
+  <!-- header -->
+  <text class="tag" x="32" y="40">BROKEN ARROW MOD</text>
+  <text class="brand" x="30" y="80"><tspan fill="#f3e6cf">BA </tspan><tspan fill="url(#title)">SAVE GAME</tspan></text>
+  <text class="meta" x="788" y="40" text-anchor="end" >DEVELOPMENT RECORD</text>
+  <text class="meta" x="788" y="58" text-anchor="end" >SEP 20 – 29 · 2026</text>
+  <text class="sub" x="32" y="104">Human-directed · human-tested · AI-assisted code (Claude)</text>
+  <rect x="32" y="118" width="756" height="2" fill="url(#rule)"/>
+
+  <!-- FIELD TESTING -->
+  <text class="sec" x="32" y="148">▸ FIELD TESTING</text>
+  <text class="secn" x="168" y="148">measured from the game's own session logs</text>
+  <g>
+    <path d="M32 160 H200 L210 170 V252 H42 L32 242 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="32" y="160" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="48" y="204">96</text><text class="l" x="48" y="232">Game test sessions</text>
+
+    <path d="M222 160 H390 L400 170 V252 H232 L222 242 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="222" y="160" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="238" y="204">~27 h</text><text class="l" x="238" y="232">In game, testing</text>
+
+    <path d="M412 160 H580 L590 170 V252 H422 L412 242 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="412" y="160" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="428" y="204">56</text><text class="l" x="428" y="232">Save → load cycles</text>
+
+    <path d="M602 160 H778 L788 170 V252 H612 L602 242 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="602" y="160" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="618" y="204">2,642</text><text class="l" x="618" y="232">Respawns verified</text>
+  </g>
+
+  <!-- COMMAND & REVIEW -->
+  <text class="sec" x="32" y="288">▸ COMMAND &amp; REVIEW</text>
+  <text class="secn" x="214" y="288">from git and the development chat</text>
+  <g>
+    <path d="M32 300 H200 L210 310 V392 H42 L32 382 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="32" y="300" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="48" y="344">125</text><text class="l" x="48" y="372">Messages directing</text>
+
+    <path d="M222 300 H390 L400 310 V392 H232 L222 382 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="222" y="300" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="238" y="344">116</text><text class="l" x="238" y="372">Logs &amp; files reviewed</text>
+
+    <path d="M412 300 H580 L590 310 V392 H422 L412 382 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="412" y="300" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="428" y="344">22</text><text class="l" x="428" y="372">Commits · 2 releases</text>
+
+    <path d="M602 300 H778 L788 310 V392 H612 L602 382 Z" fill="url(#panel)" stroke="#ff8a2e" stroke-opacity="0.28"/>
+    <rect x="602" y="300" width="34" height="3" fill="#ff8a2e"/>
+    <text class="n" x="618" y="344">~6,200</text><text class="l" x="618" y="372">Lines of C# · 14 files</text>
+  </g>
+
+  <!-- after-action -->
+  <text class="foot" x="32" y="424"><tspan class="footb">Caught in testing, then fixed: </tspan>lost unit orders after loading, credits spent on units that never spawned,</text>
+  <text class="foot" x="32" y="441">artillery driving to the map corner, jets abandoning bombing runs, scripted patrols freezing, and more.</text>
+  <text class="foot" x="32" y="458" style="fill:#8f8374">Sources: git history, Broken Arrow session logs, the mod's load log · Open source (MIT) — read every line on GitHub.</text>
+</svg>
