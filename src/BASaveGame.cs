@@ -87,6 +87,7 @@ namespace BASaveGame
             LoadFlow.Pump();  // drives the F10 post-load stages (restore progress, settle, reconcile)
             MissionState.Tick();  // hooks the event bus once per battle to track the active map sector
             ScriptDump.Tick();    // records mission-script node activity once per battle (node timers in saves)
+            CommandJournal.Tick(); // records the unit orders the mission script gives, once per battle
             NativeUi.Tick();      // Save/Load in the pause menu and a Saved games card in the main menu
             try
             {

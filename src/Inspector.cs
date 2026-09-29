@@ -802,6 +802,12 @@ namespace BASaveGame
                 if (gm != null) sb.Append(",\n  ").Append(gm);
             }
             catch (Exception ex) { ModLog.DevWarn("[save] game mode: " + ex.Message); }
+            try
+            {
+                string orders = CommandJournal.CaptureJson();
+                if (orders != null) sb.Append(",\n  ").Append(orders);
+            }
+            catch (Exception ex) { ModLog.DevWarn("[save] unit orders: " + ex.Message); }
             sb.Append("\n}\n");
             int dupes = MissionState.DuplicateUids();
             if (dupes > 0) ModLog.DevWarn("[save] " + dupes + " live units share a mission uid with another unit (uid collision after a load?)");

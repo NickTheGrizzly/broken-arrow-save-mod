@@ -142,6 +142,25 @@ namespace BASaveGame
                 var load = Clone(settings.gameObject, _list, Tag + "Load", "Load game", () => ShowSlots(Mode.Load));
                 load.transform.SetSiblingIndex(at + 1);
                 _template = save;
+
+                // Make room: hide the list's empty spacer slots, and put Resume right under Settings
+                // (our two buttons otherwise push it off the bottom of the menu).
+                for (int i = 0; i < _list.childCount; i++)
+                {
+                    var child = _list.GetChild(i);
+                    if (child.name.EndsWith("Empty Slot")) child.gameObject.SetActive(false);
+                }
+                var resume = _list.Find("Button (resume)");
+                if (resume != null)
+                {
+                    // A gap above Resume (~100 px with the list's own spacing), then Resume and the rest.
+                    var gap = new GameObject(Tag + "Gap");
+                    gap.transform.SetParent(_list, false);
+                    gap.AddComponent<RectTransform>();
+                    SetHeight(gap, 70f);
+                    gap.transform.SetSiblingIndex(settings.transform.GetSiblingIndex() + 1);
+                    resume.SetSiblingIndex(gap.transform.GetSiblingIndex() + 1);
+                }
                 Msg("pause menu: Save game / Load game added");
             }
 
