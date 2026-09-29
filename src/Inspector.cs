@@ -379,7 +379,7 @@ namespace BASaveGame
             return p;
         }
 
-        private static object ReadComp(World world, Type t, int entityId)
+        internal static object ReadComp(World world, Type t, int entityId)
         {
             PoolView p = Pool(world, t);
             if (p.Mapping == null || p.Arr == null) return null;
@@ -688,6 +688,9 @@ namespace BASaveGame
             // Mission identity (uid + script groups) per unit, and the owners for the economy snapshot.
             var missionIds = MissionState.UnitIds();
             var owners = new HashSet<int>();
+            // Human players' hand-given move orders, per unit mission uid (AI re-issues its own).
+            var playerOrders = new List<KeyValuePair<int, string>>();
+            var isHuman = new Dictionary<int, bool>();
 
             var sb = new StringBuilder();
             sb.Append("{\n");
@@ -778,7 +781,20 @@ namespace BASaveGame
                     passengers++;
                 }
                 if (missionIds.TryGetValue(eid, out var mid))
+                {
                     sb.Append(", \"uid\": ").Append(mid.Key).Append(", \"grp\": \"").Append(Esc(mid.Value)).Append("\"");
+                    if (!isHuman.TryGetValue(owner, out bool human))
+                    {
+                        try { human = GameController.Instance.GameSession.GetPlayer(owner)?.IsBot == false; } catch { human = false; }
+                        isHuman[owner] = human;
+                    }
+                    if (human)
+                    {
+                        string moves = CommandJournal.UnitMovesJson(world, eid,
+                            targetEid => missionIds.TryGetValue(targetEid, out var t) ? t.Key : 0);
+                        if (moves != null) playerOrders.Add(new KeyValuePair<int, string>(mid.Key, moves));
+                    }
+                }
                 owners.Add(owner);
                 sb.Append("}");
             }
@@ -806,6 +822,9 @@ namespace BASaveGame
             {
                 string orders = CommandJournal.CaptureJson();
                 if (orders != null) sb.Append(",\n  ").Append(orders);
+                string mine = CommandJournal.PlayerOrdersJson(playerOrders);
+                if (mine != null) sb.Append(",\n  ").Append(mine);
+                ModLog.Dev("[orders] saved hand-given move orders for " + playerOrders.Count + " player unit(s)");
             }
             catch (Exception ex) { ModLog.DevWarn("[save] unit orders: " + ex.Message); }
             sb.Append("\n}\n");

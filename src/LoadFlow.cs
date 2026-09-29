@@ -54,6 +54,7 @@ namespace BASaveGame
         private static DeckState.Saved _deck;
         private static GameModeState.Saved _gameMode;
         private static CommandJournal.Saved _orders;
+        private static List<(int uid, System.Text.Json.JsonElement moves)> _playerOrders;
 
         private struct Launch { public string scenario, folder, hash, scene, deck; }
 
@@ -290,6 +291,7 @@ namespace BASaveGame
                 if (_gameMode != null) GameModeState.Restore(_gameMode, _mission?.zones, Log);
                 if (resume != null && resume.Count > 0) ScriptState.Resume(resume, _script.gameTime, Log);
                 if (_orders != null) CommandJournal.Replay(_orders, Log);   // last: the script's patrol/attack orders
+                CommandJournal.ReplayPlayerOrders(_playerOrders, Log);      // then the moves the player had given
             }
             catch (Exception e)
             {
@@ -440,6 +442,7 @@ namespace BASaveGame
             _deck = null;
             _gameMode = null;
             _orders = null;
+            _playerOrders = null;
             try
             {
                 string path = _path;
@@ -450,6 +453,7 @@ namespace BASaveGame
                 _deck = DeckState.Parse(root);
                 _gameMode = GameModeState.Parse(root);
                 _orders = CommandJournal.Parse(root);
+                _playerOrders = CommandJournal.ParsePlayerOrders(root);
                 Log("save state: gameTime=" + _mission.gameTime.ToString("0.0") + " zones=" + _mission.zones.Count +
                     " players=" + _mission.money.Count + " journal=" + _mission.journal.Count +
                     " scriptNodes=" + (_script != null ? _script.nodes.Count.ToString() : "none") +

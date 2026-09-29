@@ -33,6 +33,7 @@ namespace BASaveGame
         private static IntPtr _hooked;
         private static float _nextCheck;
         private static bool _replaying;
+        private static bool _quiet;   // re-issuing player orders: don't journal them as script orders
         private static readonly List<Il2CppSystem.Delegate> _keepAlive = new List<Il2CppSystem.Delegate>();
 
         private static readonly Dictionary<string, Type> Kinds = new Dictionary<string, Type>
@@ -122,7 +123,7 @@ namespace BASaveGame
 
         private static void Add(string kind, string target, Dictionary<string, object> fields, bool queued)
         {
-            if (target == null) return;
+            if (target == null || _quiet) return;
             var e = new Entry { seq = ++_seq, kind = kind, target = target, fields = fields };
             if (!queued || !_orders.TryGetValue(target, out var list)) _orders[target] = list = new List<Entry>();
             list.Add(e);
@@ -283,6 +284,176 @@ namespace BASaveGame
             d.Blocking = false;
             d.BlockingCallback = null;
             return d;
+        }
+
+        // ================= player orders =================
+        // Orders a human player gave by hand live on the unit (CommandsComponent: current command +
+        // queue) and never pass through the script bus. At save time we read the move orders of
+        // human players' units (target position + kind); after a load they're re-issued through
+        // the same bus by the unit's mission uid (restored units keep theirs), without journaling
+        // them as script orders. Attacks/loads/other command types aren't restored.
+
+        private static Type _commandsType;
+
+        /// <summary>
+        /// A unit's pending orders, current first: moves ["move"|"fast"|"attackMove", x, y, z],
+        /// ["unload", x, y, z] and airstrikes ["strike", x, y, z, attackType, targetUid]. Null if none.
+        /// <paramref name="uidOf"/> maps an entity id to its mission uid (0 = none), for strike targets.
+        /// </summary>
+        internal static string UnitMovesJson(Il2CppDefaultEcs.World world, int entityId, Func<int, int> uidOf)
+        {
+            try
+            {
+                _commandsType ??= typeof(GameController).Assembly.GetType("Il2CppBrokenArrow.Shared.Ecs.Components.CommandsComponent");
+                var cc = Inspector.ReadComp(world, _commandsType, entityId) as Il2CppBrokenArrow.Shared.Ecs.Components.CommandsComponent;
+                if (cc == null) return null;
+                var moves = new List<string>();
+                var current = cc.CurrentCommand;
+                AddCommand(current, moves, uidOf);
+                var queue = cc.Commands;
+                var seen = new List<string>();
+                if (current != null) seen.Add(Describe(current) + "*");
+                if (queue != null)
+                    foreach (var c in queue.ToArray())
+                    {
+                        // The current command can still sit at the head of the queue: don't record it twice.
+                        if (c == null || (current != null && c.Pointer == current.Pointer)) continue;
+                        seen.Add(Describe(c));
+                        AddCommand(c, moves, uidOf);
+                    }
+                if (SaveMod.DevMode) ModLog.Dev("[orders] E" + entityId + " commands: " + (seen.Count == 0 ? "none" : string.Join(", ", seen)) + " -> saved " + moves.Count);
+                return moves.Count == 0 ? null : "[" + string.Join(", ", moves) + "]";
+            }
+            catch (Exception e) { ModLog.DevWarn("[orders] unit E" + entityId + " orders: " + e.Message); return null; }
+        }
+
+        /// <summary>"AirstrikeCommand[completed]" etc., for the developer log.</summary>
+        private static string Describe(Il2CppBrokenArrow.Shared.Ecs.Commands.ICommand command)
+        {
+            try
+            {
+                var bc = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.BaseCommand>();
+                string name = ScriptDump.SafeTypeName(command);
+                if (bc == null) return name;
+                return name + (bc.WasCompleted ? "[completed]" : "") + (bc.WasCanceled ? "[canceled]" : "");
+            }
+            catch { return "?"; }
+        }
+
+        private static void AddCommand(Il2CppBrokenArrow.Shared.Ecs.Commands.ICommand command, List<string> moves, Func<int, int> uidOf)
+        {
+            if (command == null) return;
+            var bc = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.BaseCommand>();
+            if (bc == null || bc.WasCompleted || bc.WasCanceled) return;
+
+            var strike = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.AirstrikeCommand>();
+            if (strike != null)
+            {
+                int targetUid = 0;
+                try
+                {
+                    var target = strike.TargetEntity;
+                    if (target.HasValue) targetUid = uidOf(target.Value.EntityId);
+                }
+                catch { }
+                var s = strike.FirstTargetPosition;
+                moves.Add("[\"strike\", " + F(s.x) + ", " + F(s.y) + ", " + F(s.z) + ", " + (int)strike.AttackType + ", " + targetUid + "]");
+                return;
+            }
+
+            var move = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.BaseMoveCommand>();
+            if (move == null) return;
+            string kind = command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.UnloadCommand>() != null ? "unload"
+                        : command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.FastMoveCommand>() != null ? "fast"
+                        : command.TryCast<Il2CppBrokenArrow.Client.Ecs.Commands.MoveAndAttackCommand>() != null ? "attackMove"
+                        : "move";
+            var p = move.TargetPosition;
+            moves.Add("[\"" + kind + "\", " + F(p.x) + ", " + F(p.y) + ", " + F(p.z) + "]");
+        }
+
+        private static string F(float f) => f.ToString("R", CultureInfo.InvariantCulture);
+
+        /// <summary>The "playerOrders" member: [{"uid": N, "m": [[kind, x, y, z], ...]}, ...].</summary>
+        internal static string PlayerOrdersJson(List<KeyValuePair<int, string>> perUnit) =>
+            perUnit.Count == 0 ? null
+            : "\"playerOrders\": [" + string.Join(", ", perUnit.ConvertAll(kv => "{\"uid\": " + kv.Key + ", \"m\": " + kv.Value + "}")) + "]";
+
+        internal static List<(int uid, JsonElement moves)> ParsePlayerOrders(JsonElement root)
+        {
+            var list = new List<(int, JsonElement)>();
+            if (root.TryGetProperty("playerOrders", out var po) && po.ValueKind == JsonValueKind.Array)
+                foreach (var o in po.EnumerateArray()) list.Add((o.GetProperty("uid").GetInt32(), o.GetProperty("m").Clone()));
+            return list;
+        }
+
+        /// <summary>Re-issue human players' saved move orders to the restored units, in order (the rest queued).</summary>
+        internal static void ReplayPlayerOrders(List<(int uid, JsonElement moves)> orders, Action<string> log)
+        {
+            if (orders == null || orders.Count == 0) return;
+            var cmd = GameController.IsInstanceAlive ? GameController.Instance.GetEcsEventBus?.Commands : null;
+            if (cmd?.MoveSimple == null) { log("player orders: no command bus"); return; }
+            int units = 0, moves = 0, failed = 0;
+            _replaying = true;
+            _quiet = true;
+            try
+            {
+                foreach (var (uid, m) in orders)
+                {
+                    bool first = true;
+                    foreach (var mv in m.EnumerateArray())
+                    {
+                        try
+                        {
+                            string kind = mv[0].GetString();
+                            var at = new UnityEngine.Vector3(mv[1].GetSingle(), mv[2].GetSingle(), mv[3].GetSingle());
+                            if (kind == "unload")
+                            {
+                                var u = new UnloadCommandData();
+                                u.UnitID = uid;
+                                u.TargetPosition = at;
+                                u.Queue = !first;
+                                u.Blocking = false;
+                                u.UnloadedUnitsBuffer = new IntList();
+                                cmd.UnloadCommand?.Invoke(u);
+                                moves++;
+                                first = false;
+                                continue;
+                            }
+                            if (kind == "strike")
+                            {
+                                var a = new Il2CppBrokenArrow.ScriptEngine.Data.NodeAirstrikeData();
+                                a.UnitUID = uid;
+                                a.TargetVector = at;
+                                a.AttackType = (AirAttackType)mv[4].GetInt32();
+                                int targetUid = mv[5].GetInt32();
+                                if (targetUid > 0) { var t = new IntList(); t.Add(targetUid); a.TargetUnitList = t.Cast<IntReadOnlyList>(); }
+                                a.IgnoreFOW = true;   // the strike was already committed when saved
+                                a.Queue = !first;
+                                a.Blocking = false;
+                                cmd.AirstrikeCommand?.Invoke(a);
+                                moves++;
+                                first = false;
+                                continue;
+                            }
+                            var d = new MoveSimpleData();
+                            d.UnitUID = uid;
+                            d.TargetVector = new UnityEngine.Vector3(mv[1].GetSingle(), mv[2].GetSingle(), mv[3].GetSingle());
+                            d.PathfindingMethod = kind == "fast" ? PathfindingMethod.Fast : PathfindingMethod.Normal;
+                            d.RulesOfEngagement = kind == "attackMove" ? RulesOfEngagementEnum.Aggressive
+                                                : kind == "fast" ? RulesOfEngagementEnum.Retaliate : RulesOfEngagementEnum.Defensive;
+                            d.Queue = !first;
+                            d.Blocking = false;
+                            cmd.MoveSimple.Invoke(d);
+                            moves++;
+                            first = false;
+                        }
+                        catch (Exception e) { if (failed++ < 5) log("  player order for uid " + uid + " threw: " + (e.InnerException ?? e).Message); }
+                    }
+                    units++;
+                }
+            }
+            finally { _replaying = false; _quiet = false; }
+            log("player orders: re-issued " + moves + " move(s) to " + units + " unit(s)" + (failed > 0 ? " (" + failed + " failed)" : ""));
         }
 
         private static IntReadOnlyList ToList(JsonElement arr)
