@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using MelonLoader;
 using UnityEngine;
 
-[assembly: MelonInfo(typeof(BASaveGame.SaveMod), "BA Save Game", "1.0.0", "Nick")]
+[assembly: MelonInfo(typeof(BASaveGame.SaveMod), "BA Save Game", "1.1.0", "Nick")]
 [assembly: MelonGame(null, null)] // any Unity game; guarded at runtime instead
 
 namespace BASaveGame
